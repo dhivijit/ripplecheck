@@ -12,6 +12,25 @@
   "activationEvents": [],
   "main": "./out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ripplecheck-sidebar",
+          "title": "RippleCheck",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "ripplecheck-sidebar": [
+        {
+          "type": "webview",
+          "id": "ripplecheck.gitVisualizer",
+          "name": "Git Visualizer",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "ripplecheck.helloWorld",

@@ -4,6 +4,8 @@ import * as vscode from 'vscode';
 import { ensureCacheDirectory, isCacheReady } from './core/cache/cacheManager';
 import { loadProject } from './core/indexing/projectLoader';
 import { buildSymbolIndex } from './core/indexing/symbolIndex';
+import { GitVisualizerPanel } from './webview/panel';
+
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
@@ -29,6 +31,11 @@ export async function activate(context: vscode.ExtensionContext) {
 		// Step 3 — build the symbol index and persist it to cache
 		await buildSymbolIndex(project, workspaceRoot);
 	}
+
+	const provider = new GitVisualizerPanel(context.extensionUri);
+		context.subscriptions.push(
+			vscode.window.registerWebviewViewProvider(GitVisualizerPanel.viewType, provider)
+		);
 
 	// The command has been defined in the package.json file
 	// Now provide the implementation of the command with registerCommand
