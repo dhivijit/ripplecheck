@@ -1,5 +1,8 @@
 import * as vscode from 'vscode';
 import { GraphPanel } from './graphPanel';
+import { BlastRadiusResult } from '../core/blast/blastRadiusEngine';
+import { StagedFileEntry } from '../core/git/stagedSnapshot';
+import { SymbolIndex } from '../core/indexing/symbolIndex';
 
 export class GitVisualizerPanel implements vscode.WebviewViewProvider {
     public static readonly viewType = 'ripplecheck.gitVisualizer';
@@ -24,10 +27,12 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
         webviewView.webview.onDidReceiveMessage(message => {
             switch (message.command) {
                 case 'analyze':
-                    // TODO: trigger computeStagedBlastRadius
+                    vscode.commands.executeCommand('ripplecheck.analyze');
                     break;
                 case 'openFile':
-                    // TODO: vscode.workspace.openTextDocument(message.path).then(...)
+                    vscode.workspace.openTextDocument(message.path)
+                        .then(doc => vscode.window.showTextDocument(doc, { preview: false }))
+                        .then(undefined, err => console.error('[RippleCheck] openFile error:', err));
                     break;
                 case 'openGraph':
                     GraphPanel.createOrShow(this.extensionUri);
@@ -39,13 +44,59 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
         });
     }
 
+    /** Called from extension.ts to signal that analysis is starting. */
+    public postAnalysisStart(): void {
+        this._view?.webview.postMessage({ type: 'analysisStart' });
+    }
+
+    /** Called from extension.ts to push a fatal analysis error to the webview. */
+    public postError(message: string): void {
+        this._view?.webview.postMessage({ type: 'error', message });
+    }
+
     /**
      * Called from extension.ts after computeStagedBlastRadius completes.
      * Serialises Maps to plain objects before posting (JSON cannot handle Map).
      */
-    public postResult(_result: unknown, _changedFiles: unknown): void {
-        // TODO: implement serialisation and postMessage
+    public postResult(
+        result: BlastRadiusResult,
+        stagedFiles: StagedFileEntry[],
+        symbolIndex: SymbolIndex,
+    ): void {
         if (!this._view) { return; }
+
+        // Serialise a symbol ID to a plain object the webview can render.
+        const serialiseSymbol = (id: string) => {
+            const e = symbolIndex.get(id);
+            return e
+                ? { id, name: e.name, filePath: e.filePath, kind: e.kind, startLine: e.startLine }
+                : { id, name: id, filePath: '', kind: 'unknown', startLine: 0 };
+        };
+
+        // Build a flat name-lookup table for every symbol referenced in any path
+        // so the webview can display human-readable path traces.
+        const symbolNameMap: Record<string, string> = {};
+        for (const pathList of result.paths.values()) {
+            for (const path of pathList) {
+                for (const sid of path) {
+                    if (!symbolNameMap[sid]) {
+                        const sym = symbolIndex.get(sid);
+                        symbolNameMap[sid] = sym ? sym.name : sid;
+                    }
+                }
+            }
+        }
+
+        this._view.webview.postMessage({
+            type:           'analysisResult',
+            roots:          result.roots,
+            directImpact:   result.directImpact.map(serialiseSymbol),
+            indirectImpact: result.indirectImpact.map(serialiseSymbol),
+            depthMap:       Object.fromEntries(result.depthMap),
+            paths:          Object.fromEntries(result.paths),
+            symbolNameMap,
+            stagedFiles,
+        });
     }
 
     private getNonce(): string {
@@ -447,19 +498,71 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
 
         case 'analysisStart':
           setStatus('analyzing');
+          // Reset all lists to "loading" state
+          setText('changed-count', '0');
+          setText('direct-count',  '0');
+          setText('indirect-count','0');
+          setHtml('changed-files-list', '<div class="empty-state">Analyzing\u2026</div>');
+          setHtml('direct-list',        '<div class="empty-state">\u2014</div>');
+          setHtml('indirect-list',      '<div class="empty-state">\u2014</div>');
+          // Reset LLM summary skeleton
+          document.querySelectorAll('.skel').forEach(function(el) { el.style.display = ''; });
+          document.getElementById('summary-text').textContent = '';
+          document.getElementById('summary-text').style.display = 'none';
           break;
 
-        case 'analysisResult':
-          // TODO: populate changed files list and blast radius sections
+        case 'analysisResult': {
           setStatus('done');
-          break;
 
-        case 'llmChunk':
-          // TODO: append msg.text to #summary-text, hide skeleton lines
+          // Build root-reason lookup
+          var rootReasonMap = {};
+          (msg.roots || []).forEach(function(root) {
+            rootReasonMap[root.symbolId] = root.reason;
+          });
+
+          // ── Changed files ──────────────────────────────────────────────
+          var stagedFiles = msg.stagedFiles || [];
+          setText('changed-count', stagedFiles.length);
+          if (stagedFiles.length > 0) {
+            setHtml('changed-files-list', stagedFiles.map(function(f) {
+              var short = (f.absolutePath || '').split('/').slice(-3).join('/');
+              return '<div class="file-row" data-path="' + escHtml(f.absolutePath || '') + '">' +
+                     '<span class="st-badge st-' + f.status + '">' + f.status + '</span>' +
+                     '<span class="file-path" title="' + escHtml(f.absolutePath || '') + '">' + escHtml(short) + '</span>' +
+                     '</div>';
+            }).join(''));
+            document.getElementById('changed-files-list')
+              .querySelectorAll('.file-row').forEach(function(row) {
+                row.addEventListener('click', function() {
+                  vscode.postMessage({ command: 'openFile', path: row.dataset.path });
+                });
+              });
+          } else {
+            setHtml('changed-files-list', '<div class="empty-state">No staged changes detected</div>');
+          }
+
+          // ── Direct / indirect impact ───────────────────────────────────
+          renderImpactList('direct-list',   'direct-count',
+            msg.directImpact || [], msg.depthMap || {}, rootReasonMap,
+            msg.paths || {}, msg.symbolNameMap || {});
+
+          renderImpactList('indirect-list', 'indirect-count',
+            msg.indirectImpact || [], msg.depthMap || {}, rootReasonMap,
+            msg.paths || {}, msg.symbolNameMap || {});
           break;
+        }
+
+        case 'llmChunk': {
+          var summaryEl = document.getElementById('summary-text');
+          summaryEl.textContent += (msg.text || '');
+          summaryEl.style.display = 'block';
+          document.querySelectorAll('.skel').forEach(function(el) { el.style.display = 'none'; });
+          break;
+        }
 
         case 'llmDone':
-          // TODO: hide skeleton, show #summary-text
+          document.querySelectorAll('.skel').forEach(function(el) { el.style.display = 'none'; });
+          document.getElementById('summary-text').style.display = 'block';
           break;
 
         case 'error':
@@ -470,10 +573,80 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
 
     // ── Helpers ──────────────────────────────────────────────────────────
     function setStatus(state) {
-      const dot = document.getElementById('status-dot');
+      var dot = document.getElementById('status-dot');
       dot.className = '';
       if (state !== 'idle') { dot.classList.add(state); }
       dot.title = state.charAt(0).toUpperCase() + state.slice(1);
+    }
+
+    function setText(id, val) {
+      document.getElementById(id).textContent = val;
+    }
+
+    function setHtml(id, html) {
+      document.getElementById(id).innerHTML = html;
+    }
+
+    function escHtml(s) {
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    /**
+     * Render an impact symbol list into listId / countId elements.
+     *
+     * @param {string}   listId       - ID of the container element
+     * @param {string}   countId      - ID of the badge element
+     * @param {Array}    symbols      - serialised SymbolEntry objects
+     * @param {Object}   depthMap     - { [symbolId]: number }
+     * @param {Object}   rootReasonMap - { [symbolId]: RootReason }
+     * @param {Object}   paths        - { [symbolId]: string[][] }
+     * @param {Object}   nameMap      - { [symbolId]: string }
+     */
+    function renderImpactList(listId, countId, symbols, depthMap, rootReasonMap, paths, nameMap) {
+      var listEl  = document.getElementById(listId);
+      var countEl = document.getElementById(countId);
+      if (!symbols || symbols.length === 0) {
+        countEl.textContent = '0';
+        listEl.innerHTML    = '<div class="empty-state">\u2014</div>';
+        return;
+      }
+      countEl.textContent = symbols.length;
+      listEl.innerHTML = symbols.map(function(sym) {
+        var depth     = depthMap[sym.id] !== undefined ? depthMap[sym.id] : '?';
+        var reason    = rootReasonMap[sym.id] || '';
+        var shortFile = sym.filePath
+          ? sym.filePath.replace(/^.*\\/([^\\/]+\\/[^\\/]+)$/, '$1').replace(/^.*\\/([^\\/]+)$/, '$1')
+          : '';
+        var symPaths  = paths[sym.id] || [];
+        var pathHtml  = '';
+        if (symPaths.length > 0) {
+          pathHtml = '<div class="path-trace">' +
+            symPaths.map(function(p) {
+              return p.map(function(id) { return escHtml(nameMap[id] || id); }).join(' \u2192 ');
+            }).join('<br>') +
+            '</div>';
+        }
+        return '<div class="impact-row">' +
+               '<div class="impact-hdr" role="button">' +
+               '<span class="sym-name" title="' + escHtml(sym.name) + '">' + escHtml(sym.name) + '</span>' +
+               '<span class="depth-badge">d' + depth + '</span>' +
+               (reason ? '<span class="reason-tag">' + escHtml(reason) + '</span>' : '') +
+               '</div>' +
+               '<div class="sym-file">' + escHtml(shortFile) + (sym.startLine ? ':' + sym.startLine : '') + '</div>' +
+               pathHtml +
+               '</div>';
+      }).join('');
+
+      // Toggle path-trace on click
+      listEl.querySelectorAll('.impact-row').forEach(function(row) {
+        row.querySelector('.impact-hdr').addEventListener('click', function() {
+          row.classList.toggle('expanded');
+        });
+      });
     }
 
   }());

@@ -251,25 +251,8 @@ export class GraphPanel {
 (function () {
   'use strict';
 
-  // ── Dummy placeholder data ─────────────────────────────────────────────
-  const dummyElements = [
-    { data: { id: 'A', label: 'authService'    }, classes: 'root'     },
-    { data: { id: 'B', label: 'userController' }, classes: 'direct'   },
-    { data: { id: 'C', label: 'sessionManager' }, classes: 'direct'   },
-    { data: { id: 'D', label: 'tokenValidator' }, classes: 'indirect' },
-    { data: { id: 'E', label: 'httpMiddleware' }, classes: 'indirect' },
-    { data: { id: 'F', label: 'dbConnector'   }, classes: 'other'    },
-    { data: { id: 'G', label: 'configLoader'  }, classes: 'other'    },
-    { data: { id: 'H', label: 'logService'    }, classes: 'other'    },
-    { data: { id: 'AB', source: 'A', target: 'B' } },
-    { data: { id: 'AC', source: 'A', target: 'C' } },
-    { data: { id: 'BD', source: 'B', target: 'D' } },
-    { data: { id: 'CE', source: 'C', target: 'E' } },
-    { data: { id: 'DF', source: 'D', target: 'F' } },
-    { data: { id: 'GA', source: 'G', target: 'A' } },
-    { data: { id: 'FH', source: 'F', target: 'H' } },
-    { data: { id: 'EH', source: 'E', target: 'H' } },
-  ];
+  // No placeholder data — real elements arrive via the 'graphData' postMessage.
+  const initialElements = [];
 
   const cyStyle = [
     {
@@ -310,7 +293,7 @@ export class GraphPanel {
 
   let cy = cytoscape({
     container:          document.getElementById('cy'),
-    elements:           dummyElements,
+    elements:           initialElements,
     style:              cyStyle,
     layout:             { name: 'cose', animate: false, padding: 30, nodeRepulsion: 5000 },
     zoomingEnabled:     true,
@@ -320,8 +303,7 @@ export class GraphPanel {
     maxZoom:            5,
   });
 
-  // Hide empty state once graph is loaded
-  document.getElementById('empty-state').style.display = 'none';
+  // Empty state is hidden once real graph data arrives (see 'graphData' handler below)
 
   // ── Toolbar: toggle ──────────────────────────────────────────────────────
   function setToggle(mode) {
@@ -366,15 +348,29 @@ export class GraphPanel {
         break;
 
       case 'graphData':
-        // TODO: replace dummy elements with real project graph
-        // cy.elements().remove();
-        // cy.add(msg.nodes.concat(msg.edges));
-        // cy.layout({ name: 'cose', animate: false, padding: 30 }).run();
+        // Replace all elements with real project graph
+        cy.elements().remove();
+        cy.add((msg.nodes || []).concat(msg.edges || []));
+        cy.layout({ name: 'cose', animate: false, padding: 30, nodeRepulsion: 5000 }).run();
+        document.getElementById('empty-state').style.display = 'none';
         break;
 
-      case 'analysisResult':
-        // TODO: recolour nodes based on result.directImpact / indirectImpact / roots
+      case 'analysisResult': {
+        // Recolour nodes based on blast radius classification
+        var rootSet     = new Set((msg.result.roots    || []));
+        var directSet   = new Set((msg.result.direct   || []));
+        var indirectSet = new Set((msg.result.indirect || []));
+
+        cy.nodes().forEach(function(node) {
+          node.removeClass('root direct indirect other');
+          var id = node.id();
+          if      (rootSet.has(id))     { node.addClass('root'); }
+          else if (directSet.has(id))   { node.addClass('direct'); }
+          else if (indirectSet.has(id)) { node.addClass('indirect'); }
+          else                          { node.addClass('other'); }
+        });
         break;
+      }
     }
   });
 

@@ -9,10 +9,13 @@ import { loadProject } from './core/indexing/projectLoader';
 import { buildSymbolIndex, persistSymbolIndex } from './core/indexing/symbolIndex';
 import { extractSymbols } from './core/indexing/symbolExtractor';
 import { GitVisualizerPanel } from './webview/panel';
+import { GraphPanel } from './webview/graphPanel';
 import { buildReferenceGraph, walkSourceFile } from './core/indexing/referenceWalker';
 import { persistDependencyGraph } from './core/graph/graphStore';
 import { removeFileFromGraph } from './core/watch/incrementalUpdater';
 import { registerFileWatcher } from './core/watch/fileWatcher';
+import { computeStagedBlastRadius, BlastRadiusResult } from './core/blast/blastRadiusEngine';
+import { getStagedFiles } from './core/git/stagedSnapshot';
 import { DependencyGraph } from './core/graph/types';
 import { SymbolIndex } from './core/indexing/symbolIndex';
 
@@ -21,7 +24,9 @@ import { SymbolIndex } from './core/indexing/symbolIndex';
 export async function activate(context: vscode.ExtensionContext) {
 
 	console.log('[RippleCheck] Activating...');
-
+	// Declared here so the onRipple closure and ripplecheck.analyze command can
+	// both post messages to the sidebar without a separate ref-object indirection.
+	let provider: GitVisualizerPanel | undefined;
 	const workspaceFolders = vscode.workspace.workspaceFolders;
 	if (workspaceFolders && workspaceFolders.length > 0) {
 		const workspaceRoot = workspaceFolders[0].uri;
@@ -128,34 +133,114 @@ export async function activate(context: vscode.ExtensionContext) {
 			await saveFileHashes(hashes, workspaceRoot);
 		}
 
+		// ── Helper: run blast radius and push to all open panels ────────────────
+		const runAnalysis = async (): Promise<void> => {
+			provider?.postAnalysisStart();
+			try {
+				const result     = await computeStagedBlastRadius(project, symbolIndex, graph, workspaceRootFsPath);
+				const stagedFiles = await getStagedFiles(workspaceRootFsPath);
+				provider?.postResult(result, stagedFiles, symbolIndex);
+
+				// Push graph data to the Cytoscape panel (if open)
+				const { nodes, edges } = buildGraphElements(symbolIndex, graph, result);
+				GraphPanel.postGraphData(nodes, edges);
+				GraphPanel.postAnalysisResult({
+					roots:    result.roots.map(r => r.symbolId),
+					direct:   result.directImpact,
+					indirect: result.indirectImpact,
+				});
+			} catch (err) {
+				console.error('[RippleCheck] Blast radius error:', err);
+				provider?.postError(String(err));
+			}
+		};
+
 		// Step 6 — watch for file changes and keep graph in sync incrementally
 		registerFileWatcher(project, symbolIndex, graph, workspaceRoot, context, {
 			onRipple(rippleIds, filePath) {
 				console.log(
 					`[RippleCheck] ${rippleIds.length} signature ripple(s) in ` +
-					`${filePath.split('/').pop()} — blast radius pending webview integration`
+					`${filePath.split('/').pop()} — running blast radius analysis`,
 				);
-				// TODO: call computeStagedBlastRadius and push result to webview panel
+				void runAnalysis();
 			},
 		});
+
+		// Step 7 — register the on-demand "Analyze" command
+		context.subscriptions.push(
+			vscode.commands.registerCommand('ripplecheck.analyze', () => void runAnalysis()),
+		);
 	}
 
-	const provider = new GitVisualizerPanel(context.extensionUri);
+	provider = new GitVisualizerPanel(context.extensionUri);
 	context.subscriptions.push(
-		vscode.window.registerWebviewViewProvider(GitVisualizerPanel.viewType, provider)
+		vscode.window.registerWebviewViewProvider(GitVisualizerPanel.viewType, provider),
 	);
 
-	// The command has been defined in the package.json file
-	// Now provide the implementation of the command with registerCommand
-	// The commandId parameter must match the command field in package.json
-	const disposable = vscode.commands.registerCommand('ripplecheck.helloWorld', () => {
-		// The code you place here will be executed every time your command is executed
-		// Display a message box to the user
-		vscode.window.showInformationMessage('Hello World from RippleCheck!');
-	});
-
-	context.subscriptions.push(disposable);
+	// Legacy hello-world command kept for package.json compatibility
+	context.subscriptions.push(
+		vscode.commands.registerCommand('ripplecheck.helloWorld', () =>
+			vscode.window.showInformationMessage('RippleCheck is active — use the sidebar to analyze staged changes.')
+		),
+	);
 }
 
 // This method is called when your extension is deactivated
 export function deactivate() {}
+
+// ---------------------------------------------------------------------------
+// Graph element builder (Cytoscape-format, scoped to blast radius + 1-hop)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build Cytoscape node/edge objects for the impacted symbol set.
+ *
+ * To keep the graph manageable we include:
+ *   - All roots, direct, and indirect impact symbols
+ *   - Their forward/reverse neighbours in the live graph (1-hop context)
+ *
+ * Each node carries a `role` field: 'root' | 'direct' | 'indirect' | 'other'
+ * which graphPanel.ts uses for colour coding.
+ */
+function buildGraphElements(
+    symbolIndex: SymbolIndex,
+    graph: DependencyGraph,
+    result: BlastRadiusResult,
+): { nodes: object[]; edges: object[] } {
+    const rootIds     = new Set(result.roots.map(r => r.symbolId));
+    const directIds   = new Set(result.directImpact);
+    const indirectIds = new Set(result.indirectImpact);
+
+    // Start with the full impacted set
+    const allIds = new Set([...rootIds, ...directIds, ...indirectIds]);
+
+    // Add one hop of context around roots so edges have both endpoints
+    for (const rootId of rootIds) {
+        for (const nid of (graph.forward.get(rootId) ?? [])) { allIds.add(nid); }
+        for (const nid of (graph.reverse.get(rootId) ?? [])) { allIds.add(nid); }
+    }
+
+    const role = (id: string): string => {
+        if (rootIds.has(id))     { return 'root'; }
+        if (directIds.has(id))   { return 'direct'; }
+        if (indirectIds.has(id)) { return 'indirect'; }
+        return 'other';
+    };
+
+    const nodes = [...allIds].map(id => {
+        const sym   = symbolIndex.get(id);
+        const label = sym ? sym.name : id;
+        return { data: { id, label, role: role(id) } };
+    });
+
+    const edges: object[] = [];
+    for (const srcId of allIds) {
+        for (const tgtId of (graph.forward.get(srcId) ?? [])) {
+            if (allIds.has(tgtId)) {
+                edges.push({ data: { id: `${srcId}\u2192${tgtId}`, source: srcId, target: tgtId } });
+            }
+        }
+    }
+
+    return { nodes, edges };
+}
