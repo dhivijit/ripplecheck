@@ -26,7 +26,7 @@
         {
           "type": "webview",
           "id": "ripplecheck.gitVisualizer",
-          "name": "Git Visualizer",
+          "name": "RippleCheck",
           "icon": "media/icon.svg"
         }
       ]
