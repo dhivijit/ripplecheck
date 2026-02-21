@@ -15,6 +15,7 @@ import { removeFileFromGraph } from './core/watch/incrementalUpdater';
 import { registerFileWatcher } from './core/watch/fileWatcher';
 import { DependencyGraph } from './core/graph/types';
 import { SymbolIndex } from './core/indexing/symbolIndex';
+import { parseIntent } from './core/intent/intentParser';
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
@@ -140,7 +141,21 @@ export async function activate(context: vscode.ExtensionContext) {
 		});
 	}
 
-	const provider = new GitVisualizerPanel(context.extensionUri);
+	const provider = new GitVisualizerPanel();
+
+	// Wire the intent parser into the panel so the What If? input works.
+	provider.onWhatIfRequest = (prompt, token) => {
+		console.log(`[RippleCheck] What-if request: "${prompt}"`);
+		return parseIntent(prompt, token).then(result => {
+			if (result.ok) {
+				return result.value;
+			}
+			throw new Error(result.error.reason);
+		});
+	};
+
+	console.log('[RippleCheck] Intent parser wired to panel');
+
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider(GitVisualizerPanel.viewType, provider)
 	);
