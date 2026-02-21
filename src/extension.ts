@@ -16,6 +16,7 @@ import { buildGraphElements } from './core/graph/graphElements';
 import { removeFileFromGraph } from './core/watch/incrementalUpdater';
 import { registerFileWatcher } from './core/watch/fileWatcher';
 import { computeStagedBlastRadius, BlastRadiusResult } from './core/blast/blastRadiusEngine';
+import { computeInEditorBlastRadius } from './core/blast/blastRadiusEngine';
 import { getStagedFiles } from './core/git/stagedSnapshot';
 import { DependencyGraph } from './core/graph/types';
 import { SymbolIndex } from './core/indexing/symbolIndex';
@@ -184,13 +185,57 @@ export async function activate(context: vscode.ExtensionContext) {
 			}
 		};
 
+		// ── Helper: in-editor blast radius (no git staging required) ────────────
+		// Called when the file watcher detects a signature change or symbol
+		// deletion in the editor buffer, before the user has run `git add`.
+		const runInEditorAnalysis = (changeResult: import('./core/analysis/signatureAnalyzer').SignatureChangeResult, filePath: string): void => {
+			provider?.postAnalysisStart();
+			try {
+				const result = computeInEditorBlastRadius(
+					changeResult.ripple,
+					changeResult.removed,
+					changeResult.preRemovalDependents,
+					graph,
+				);
+				// Show the changed file itself in the "Changed Files" list so the
+				// panel isn't completely empty on that section.
+				const fakeEntry: import('./core/git/stagedSnapshot').StagedFileEntry = {
+					status: 'M',
+					absolutePath: filePath,
+				};
+				provider?.postResult(result, [fakeEntry], symbolIndex);
+
+				const { nodes, edges } = buildGraphElements(symbolIndex, graph, result);
+				GraphPanel.postGraphData(nodes, edges);
+				GraphPanel.postAnalysisResult({
+					roots:    result.roots.map(r => r.symbolId),
+					direct:   result.directImpact,
+					indirect: result.indirectImpact,
+				});
+				console.log(
+					`[RippleCheck] In-editor blast radius — ` +
+					`${result.roots.length} root(s), ` +
+					`${result.directImpact.length} direct, ` +
+					`${result.indirectImpact.length} indirect`,
+				);
+			} catch (err) {
+				console.error('[RippleCheck] In-editor blast radius error:', err);
+				provider?.postError(String(err));
+			}
+		};
+
 		// Step 6 — watch for file changes and keep graph in sync incrementally
 		registerFileWatcher(project, symbolIndex, graph, workspaceRoot, context, {
-			onRipple(rippleIds, filePath) {
+			onRipple(changeResult, filePath) {
 				console.log(
-					`[RippleCheck] ${rippleIds.length} signature ripple(s) in ` +
-					`${filePath.split('/').pop()} — running blast radius analysis`,
+					`[RippleCheck] Signature/removal change in ` +
+					`${filePath.split('/').pop()} (${changeResult.ripple.length} ripple(s), ` +
+					`${changeResult.removed.length} removed) — running in-editor blast radius`,
 				);
+				runInEditorAnalysis(changeResult, filePath);
+			},
+			onStagingChange() {
+				console.log('[RippleCheck] Staging area changed — running blast radius analysis');
 				void runAnalysis();
 			},
 		});

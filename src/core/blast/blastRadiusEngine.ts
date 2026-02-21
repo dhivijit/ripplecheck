@@ -282,6 +282,68 @@ export async function computeStagedBlastRadius(
 }
 
 // ---------------------------------------------------------------------------
+// In-editor (live) blast radius
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute blast radius from **live in-editor** changes without requiring
+ * anything to be staged in git.
+ *
+ * Unlike `computeStagedBlastRadius` (which reads `git diff --cached`), this
+ * function works entirely from the already-updated live graph and the
+ * pre-removal dependent snapshot captured in `handleFileChanged`.
+ *
+ * ## Why a temp graph for deleted symbols?
+ *
+ * `removeFileFromGraph` cleans up reverse edges before this function is called.
+ * If we ran BFS on the live graph from a deleted symbol ID, `graph.reverse.get(id)`
+ * would return undefined and we'd find no dependents.
+ *
+ * We restore the missing reverse edges into a shallow clone of the live graph
+ * so that `traverseImpact` can BFS through them normally, then discard the clone.
+ *
+ * @param rippleIds           IDs of symbols whose signature changed in the editor.
+ * @param removedIds          IDs of symbols deleted from the file in the editor.
+ * @param preRemovalDependents Map of removedId → [dependentIds] captured before removal.
+ * @param graph               The live dependency graph (not mutated).
+ */
+export function computeInEditorBlastRadius(
+    rippleIds: string[],
+    removedIds: string[],
+    preRemovalDependents: Map<string, string[]>,
+    graph: DependencyGraph,
+): BlastRadiusResult {
+    const roots: ImpactRoot[] = [
+        ...rippleIds.map(id => ({
+            symbolId: id,
+            propagationMode: 'deep' as const,
+            reason: 'signature-ripple' as const,
+        })),
+        ...removedIds.filter(id => preRemovalDependents.has(id)).map(id => ({
+            symbolId: id,
+            propagationMode: 'deep' as const,
+            reason: 'deleted' as const,
+        })),
+    ];
+
+    if (roots.length === 0) {
+        return { roots: [], directImpact: [], indirectImpact: [], depthMap: new Map(), paths: new Map() };
+    }
+
+    // Build a shallow-clone of the live graph and inject the pre-removal reverse
+    // edges back so BFS from deleted roots can find their dependents.
+    const tempReverse = new Map(graph.reverse);
+    for (const [removedId, deps] of preRemovalDependents) {
+        if (deps.length > 0) {
+            tempReverse.set(removedId, new Set(deps));
+        }
+    }
+    const tempGraph: DependencyGraph = { forward: graph.forward, reverse: tempReverse };
+
+    return traverseImpact(roots, tempGraph);
+}
+
+// ---------------------------------------------------------------------------
 // Traversal
 // ---------------------------------------------------------------------------
 

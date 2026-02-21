@@ -80,7 +80,7 @@ export async function getStagedDiffHunks(repoRoot: string): Promise<DiffHunk[]> 
                 currentAbsPath = null;
             } else {
                 const relPath = rawPath.startsWith('b/') ? rawPath.slice(2) : rawPath;
-                currentAbsPath = path.join(repoRoot, relPath);
+                currentAbsPath = path.join(repoRoot, relPath).replace(/\\/g, '/');
             }
             continue;
         }

@@ -10,6 +10,12 @@ export interface SignatureChangeResult {
     added: string[];
     /** Symbols removed from this file. */
     removed: string[];
+    /**
+     * Dependents of removed symbols, captured BEFORE their graph edges were
+     * cleaned up.  Keyed by the removed symbol ID; values are the IDs of
+     * symbols that depended on it.  Populated only by handleFileChanged.
+     */
+    preRemovalDependents: Map<string, string[]>;
 }
 
 /**
@@ -40,7 +46,7 @@ export function detectSignatureChanges(
     oldHashes: Map<string, string>,
     newIndex: SymbolIndex,
 ): SignatureChangeResult {
-    const result: SignatureChangeResult = { ripple: [], safe: [], added: [], removed: [] };
+    const result: SignatureChangeResult = { ripple: [], safe: [], added: [], removed: [], preRemovalDependents: new Map() };
 
     for (const [id, entry] of newIndex) {
         if (entry.filePath !== filePath) { continue; }

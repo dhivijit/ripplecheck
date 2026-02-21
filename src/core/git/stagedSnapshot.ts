@@ -59,13 +59,13 @@ export async function getStagedFiles(repoRoot: string): Promise<StagedFileEntry[
             // Rename or copy: old path is parts[1], new path is parts[2]
             entries.push({
                 status,
-                absolutePath: path.join(repoRoot, parts[2]),
-                oldAbsolutePath: path.join(repoRoot, parts[1]),
+                absolutePath: path.join(repoRoot, parts[2]).replace(/\\/g, '/'),
+                oldAbsolutePath: path.join(repoRoot, parts[1]).replace(/\\/g, '/'),
             });
         } else if (parts.length >= 2) {
             entries.push({
                 status,
-                absolutePath: path.join(repoRoot, parts[1]),
+                absolutePath: path.join(repoRoot, parts[1]).replace(/\\/g, '/'),
             });
         }
     }

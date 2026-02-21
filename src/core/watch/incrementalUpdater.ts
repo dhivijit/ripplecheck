@@ -126,13 +126,25 @@ export function handleFileChanged(
     // Snapshot signatures BEFORE wiping so we can detect what changed
     const oldHashes = snapshotSignatures(fsPath, symbolIndex);
 
+    // Capture reverse edges of all current file symbols BEFORE removal so that
+    // we can later identify who depended on deleted symbols.
+    const preRemovalDependents = new Map<string, string[]>();
+    for (const [id, entry] of symbolIndex) {
+        if (entry.filePath === fsPath) {
+            const deps = graph.reverse.get(id);
+            if (deps && deps.size > 0) {
+                preRemovalDependents.set(id, [...deps]);
+            }
+        }
+    }
+
     // Step A + B: erase stale knowledge
     removeFileFromGraph(fsPath, symbolIndex, graph);
 
     // Step C: refresh source file with in-memory content
     const sourceFile = refreshSourceFile(project, fsPath, newContent);
     if (!sourceFile) {
-        return { ripple: [], safe: [], added: [], removed: Array.from(oldHashes.keys()) };
+        return { ripple: [], safe: [], added: [], removed: Array.from(oldHashes.keys()), preRemovalDependents: new Map() };
     }
 
     // Step D: re-extract symbols and re-walk references
@@ -140,6 +152,13 @@ export function handleFileChanged(
     walkSourceFile(sourceFile, symbolIndex, workspaceRootFsPath, graph);
 
     const changes = detectSignatureChanges(fsPath, oldHashes, symbolIndex);
+
+    // Attach pre-removal dependents for removed symbols only
+    for (const removedId of changes.removed) {
+        const deps = preRemovalDependents.get(removedId);
+        if (deps) { changes.preRemovalDependents.set(removedId, deps); }
+    }
+
     const elapsed = Date.now() - t0;
     console.log(
         `[RippleCheck] Incremental update (edit) — ${fsPath} — ${elapsed}ms ` +

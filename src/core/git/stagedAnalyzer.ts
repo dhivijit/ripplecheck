@@ -102,7 +102,7 @@ export async function analyzeStagedChanges(
             // ── Deleted: wipe symbols & edges, nothing to re-index ──────────
             handleFileDeleted(absolutePath, project, symbolIndex, graph);
             // An all-empty result; ghost detection below will surface orphaned dependents
-            perFile.set(absolutePath, { ripple: [], safe: [], added: [], removed: [] });
+            perFile.set(absolutePath, { ripple: [], safe: [], added: [], removed: [], preRemovalDependents: new Map<string, string[]>() });
 
         } else if (status === 'R' || status === 'C') {
             // ── Rename / copy: treat old path as deleted, new path as added ─

@@ -17,13 +17,18 @@ import {
 export interface FileWatcherOptions {
     /**
      * Called after every debounced in-editor file change that produces at
-     * least one signature ripple (public API altered).  The ripple symbol IDs
-     * and the originating file path are provided so the caller can trigger a
-     * blast-radius computation or update the UI.
-     *
-     * Not called for safe (body-only) edits or when ripple.length === 0.
+     * least one signature ripple (public API altered) or symbol removal.
+     * The full SignatureChangeResult is provided — callers can access ripple,
+     * removed, and preRemovalDependents to compute in-editor blast radius.
      */
-    onRipple?: (rippleIds: string[], filePath: string) => void;
+    onRipple?: (changeResult: SignatureChangeResult, filePath: string) => void;
+
+    /**
+     * Called when the git staging area changes (.git/index written), i.e.
+     * after `git add` / `git restore --staged`.  This is the right moment
+     * to re-run `computeStagedBlastRadius` since staged content changed.
+     */
+    onStagingChange?: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,8 +115,8 @@ export function registerFileWatcher(
         const fsPath = document.uri.fsPath.replace(/\\/g, '/');
         if (!isWatchedFile(fsPath, rootFsPath)) { return; }
         const result = handleFileChanged(fsPath, document.getText(), project, symbolIndex, graph, rootFsPath);
-        if (options?.onRipple && result.ripple.length > 0) {
-            options.onRipple(result.ripple, fsPath);
+        if (options?.onRipple && (result.ripple.length > 0 || result.removed.length > 0)) {
+            options.onRipple(result, fsPath);
         }
     }, 300);
 
@@ -177,6 +182,20 @@ export function registerFileWatcher(
     }, 400);
 
     externalFileWatcher.onDidChange(onExternalChange);
+
+    // --- Git index changes — triggered by `git add` / `git restore --staged` ---
+    // .git/index is rewritten whenever the staging area changes.  This is the
+    // right moment to re-run blast-radius analysis so the panel reflects the
+    // current staged diff.
+    if (options?.onStagingChange) {
+        const onStagingChange = debounce(options.onStagingChange, 400);
+        const gitIndexWatcher = vscode.workspace.createFileSystemWatcher(
+            new vscode.RelativePattern(workspaceRoot, '.git/index')
+        );
+        context.subscriptions.push(gitIndexWatcher);
+        gitIndexWatcher.onDidChange(onStagingChange);
+        gitIndexWatcher.onDidCreate(onStagingChange);
+    }
 
     // --- Git ref changes — cover all operations that rewrite file content ---
     //   .git/HEAD         → checkout, switch
