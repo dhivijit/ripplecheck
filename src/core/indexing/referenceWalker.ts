@@ -18,7 +18,14 @@ function isOwnerNode(node: Node): boolean {
         Node.isConstructorDeclaration(node) ||
         Node.isArrowFunction(node) ||
         Node.isGetAccessorDeclaration(node) ||
-        Node.isSetAccessorDeclaration(node)
+        Node.isSetAccessorDeclaration(node) ||
+        // Class bodies must be on the owner stack so that references inside
+        // class property initialisers (e.g. `scale = coerceD3(...)`) are
+        // attributed to the class rather than dropped (ownerStack empty).
+        // Method declarations are pushed on top, so method-body references
+        // are always attributed to the method (innermost owner wins).
+        Node.isClassDeclaration(node) ||
+        Node.isClassExpression(node)
     );
 }
 
@@ -61,6 +68,14 @@ function getOwnerSymbolId(node: Node, filePath: string, symbolIndex: SymbolIndex
             return has(p(parent.getName()));
         }
         return null;
+    }
+
+    if (Node.isClassDeclaration(node) || Node.isClassExpression(node)) {
+        // The class symbol owns all references in class property initialisers.
+        // Method declarations push themselves on top, so this only fires for
+        // class-body-level code (initialisers, decorators, static blocks).
+        const name = node.getName?.();
+        return name ? has(p(name)) : null;
     }
 
     return null;
@@ -174,9 +189,15 @@ function walkNode(
         // Skip identifiers that are the name of their own declaration.
         // Nearly all named declaration nodes in ts-morph expose getNameNode() —
         // if that returns this exact node, we are looking at a binding, not a reference.
+        //
+        // IMPORTANT: PropertyAccessExpression also has getNameNode() (it returns
+        // the right-side property identifier).  We must NOT treat that case as a
+        // declaration name — `obj.coerceD3` is a reference to coerceD3, not its
+        // own definition.  Exclude PropertyAccessExpression explicitly.
         const parent = node.getParent();
         const isDeclarationName =
             parent !== undefined &&
+            !Node.isPropertyAccessExpression(parent) &&
             typeof (parent as any).getNameNode === 'function' &&
             (parent as any).getNameNode() === node;
 

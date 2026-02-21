@@ -1,7 +1,7 @@
 // The module 'vscode' contains the VS Code extensibility API
 // Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
-import { SourceFile } from 'ts-morph';
+import { Project, SourceFile } from 'ts-morph';
 import { ensureCacheDirectory, computeProjectHash, writeCacheMetadata } from './core/cache/cacheManager';
 import { loadCachedSymbolIndex, loadCachedDependencyGraph, loadCachedMetadata } from './core/cache/cacheLoader';
 import { computeFileHash, saveFileHashes, loadFileHashes } from './core/cache/fileHashStore';
@@ -16,6 +16,9 @@ import { registerFileWatcher } from './core/watch/fileWatcher';
 import { DependencyGraph } from './core/graph/types';
 import { SymbolIndex } from './core/indexing/symbolIndex';
 import { parseIntent } from './core/intent/intentParser';
+import { computeStagedBlastRadius } from './core/blast/blastRadiusEngine';
+import { resolveIntent } from './core/intent/intentResolver';
+import { computePredictiveBlastRadius } from './core/intent/predictiveEngine';
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
@@ -23,16 +26,23 @@ export async function activate(context: vscode.ExtensionContext) {
 
 	console.log('[RippleCheck] Activating...');
 
+	// Hoisted so closures in registerFileWatcher and provider callbacks capture live values.
+	let symbolIndex: SymbolIndex | undefined;
+	let project: Project | undefined;
+	let graph: DependencyGraph | undefined;
+	let provider: GitVisualizerPanel | undefined;
+	let workspaceRootFsPath = '';
+
 	const workspaceFolders = vscode.workspace.workspaceFolders;
 	if (workspaceFolders && workspaceFolders.length > 0) {
 		const workspaceRoot = workspaceFolders[0].uri;
-		const workspaceRootFsPath = workspaceRoot.fsPath;
+		workspaceRootFsPath = workspaceRoot.fsPath;
 
 		// Step 1 — ensure .blastradius/ and its files exist
 		await ensureCacheDirectory(workspaceRoot);
 
 		// Step 2 — load the ts-morph project (needed for both cache and full-rebuild paths)
-		const project = loadProject(workspaceRootFsPath);
+		project = loadProject(workspaceRootFsPath);
 		const currentHash = computeProjectHash(workspaceRootFsPath);
 
 		// Step 3 — attempt to restore from cache (parallel reads)
@@ -41,9 +51,6 @@ export async function activate(context: vscode.ExtensionContext) {
 			loadCachedDependencyGraph(workspaceRoot),
 			loadCachedMetadata(workspaceRoot),
 		]);
-
-		let symbolIndex: SymbolIndex;
-		let graph: DependencyGraph;
 
 		const cacheValid =
 			cachedSymbols !== null &&
@@ -130,31 +137,59 @@ export async function activate(context: vscode.ExtensionContext) {
 		}
 
 		// Step 6 — watch for file changes and keep graph in sync incrementally
-		registerFileWatcher(project, symbolIndex, graph, workspaceRoot, context, {
-			onRipple(rippleIds, filePath) {
-				console.log(
-					`[RippleCheck] ${rippleIds.length} signature ripple(s) in ` +
-					`${filePath.split('/').pop()} — blast radius pending webview integration`
-				);
-				// TODO: call computeStagedBlastRadius and push result to webview panel
+		registerFileWatcher(project!, symbolIndex!, graph!, workspaceRoot, context, {
+			onRipple(_rippleIds, _filePath) {
+				if (!project || !symbolIndex || !graph || !provider) { return; }
+				provider.postAnalysisStart();
+				computeStagedBlastRadius(project, symbolIndex, graph, workspaceRootFsPath)
+					.then(result => {
+						provider!.postResult(result);
+					})
+					.catch((err: unknown) => {
+						provider!.postError(`Blast radius failed: ${String(err)}`);
+					});
 			},
 		});
 	}
 
-	const provider = new GitVisualizerPanel();
+	provider = new GitVisualizerPanel();
 
-	// Wire the intent parser into the panel so the What If? input works.
-	provider.onWhatIfRequest = (prompt, token) => {
-		console.log(`[RippleCheck] What-if request: "${prompt}"`);
-		return parseIntent(prompt, token).then(result => {
-			if (result.ok) {
-				return result.value;
-			}
-			throw new Error(result.error.reason);
-		});
+	// Wire the on-demand blast radius analysis (sidebar Analyse button).
+	provider.onAnalyseRequest = () => {
+		if (!project || !symbolIndex || !graph || !provider) { return; }
+		provider.postAnalysisStart();
+		computeStagedBlastRadius(project, symbolIndex, graph, workspaceRootFsPath)
+			.then(result => {
+				provider!.postResult(result);
+			})
+			.catch((err: unknown) => {
+				provider!.postError(`Blast radius failed: ${String(err)}`);
+			});
 	};
 
-	console.log('[RippleCheck] Intent parser wired to panel');
+	// Wire the full What If? pipeline: parse → resolve → virtual diff → BFS → confidence.
+	provider.onWhatIfRequest = async (prompt, token) => {
+		if (!symbolIndex || !graph) {
+			throw new Error('Workspace still loading — try again in a moment.');
+		}
+		console.log(`[RippleCheck] What-if: "${prompt}" | ${symbolIndex.size} symbols`);
+
+		// Step 1: parse intent via LLM
+		const parseResult = await parseIntent(prompt, token, symbolIndex, workspaceRootFsPath || undefined);
+		if (!parseResult.ok) { throw new Error(parseResult.error.reason); }
+
+		// Post intent immediately so the UI shows something before BFS finishes.
+		provider!.postWhatIfIntent(parseResult.value);
+
+		// Step 2: fuzzy-match hints → real symbol IDs
+		const resolved = resolveIntent(parseResult.value, symbolIndex, workspaceRootFsPath || '');
+
+		// Steps 3–5: virtual diff → BFS → confidence map
+		const predicted = computePredictiveBlastRadius(resolved, symbolIndex, graph);
+		provider!.postPredictedResult(predicted);
+	};
+
+	console.log('[RippleCheck] Blast radius + What If? pipeline wired to panel');
 
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider(GitVisualizerPanel.viewType, provider)

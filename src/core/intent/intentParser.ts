@@ -4,6 +4,7 @@ import {
     IntentChangeType,
     IntentParseResult,
 } from './types';
+import { SymbolIndex } from '../indexing/symbolIndex';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -11,35 +12,120 @@ import {
 
 const LOG_PREFIX = '[RippleCheck][Intent]';
 
+/** Caps that keep the injected repo context inside a reasonable token budget. */
+const MAX_CONTEXT_FILES   = 150;
+const MAX_CONTEXT_SYMBOLS = 400;
+
+// ---------------------------------------------------------------------------
+// Repo context builder
+// ---------------------------------------------------------------------------
+
 /**
- * System instructions embedded in the user message (VS Code LM API has no
- * dedicated system-message role, so we prefix the instructions inline).
+ * Build a compact plain-text summary of the repo that can be embedded in the
+ * LLM prompt.  This grounds the model in real symbol names and file paths so
+ * it cannot invent names that don't exist.
+ *
+ * - Exported symbols are listed first (they are the most likely targets of
+ *   intentional changes and the most useful hints for the resolver).
+ * - Absolute paths are converted to workspace-relative paths.
+ * - Both lists are capped so the injected text stays well within the model's
+ *   context window even for large projects.
  */
-const SYSTEM_INSTRUCTIONS = `\
-You are a code-change intent analyzer for a TypeScript codebase.
+function buildRepoContext(symbolIndex: SymbolIndex, workspaceRootFsPath: string): string {
+    const normalRoot = workspaceRootFsPath.replace(/\\/g, '/').replace(/\/$/, '');
 
-Given a developer's description of a planned code change, extract structured
-information and return ONLY a valid JSON object — no markdown, no explanation,
-no code fences.  The object must match this exact shape:
+    const toRelative = (abs: string): string => {
+        const norm = abs.replace(/\\/g, '/');
+        return norm.startsWith(normalRoot + '/') ? norm.slice(normalRoot.length + 1) : norm;
+    };
 
-{
-  "changeType": "add" | "modify" | "delete" | "refactor" | "unknown",
-  "symbolHints": ["function or class names mentioned or strongly implied"],
-  "fileHints": ["file paths, directories, or filename patterns mentioned"],
-  "affectsPublicApi": true | false,
-  "summary": "one sentence plain-English description of the change"
+    // ── Unique source files ───────────────────────────────────────────────
+    const filesSet = new Set<string>();
+    for (const entry of symbolIndex.values()) {
+        filesSet.add(toRelative(entry.filePath));
+    }
+    const filesList    = Array.from(filesSet).slice(0, MAX_CONTEXT_FILES);
+    const fileOverflow = filesSet.size > MAX_CONTEXT_FILES ? ` (${filesSet.size - MAX_CONTEXT_FILES} more not shown)` : '';
+
+    // ── Symbols: exported first, then alphabetical within file ───────────
+    const allEntries = Array.from(symbolIndex.values());
+    allEntries.sort(
+        (a, b) =>
+            (b.isExported ? 1 : 0) - (a.isExported ? 1 : 0) ||
+            a.filePath.localeCompare(b.filePath)              ||
+            a.name.localeCompare(b.name),
+    );
+    const topEntries    = allEntries.slice(0, MAX_CONTEXT_SYMBOLS);
+    const symOverflow   = allEntries.length > MAX_CONTEXT_SYMBOLS
+        ? ` (${allEntries.length - MAX_CONTEXT_SYMBOLS} more not shown)`
+        : '';
+
+    const symbolLines = topEntries
+        .map(e =>
+            `  ${e.name} [${e.kind}${e.isExported ? ', exported' : ''}]` +
+            ` — ${toRelative(e.filePath)}:${e.startLine}`,
+        )
+        .join('\n');
+
+    return (
+        `## Repository context\n\n` +
+        `Source files (${filesList.length}${fileOverflow}):\n` +
+        filesList.map(f => `  ${f}`).join('\n') +
+        `\n\nIndexed symbols (${topEntries.length}${symOverflow}, exported first):\n` +
+        symbolLines
+    );
 }
 
-Rules:
-- changeType must be one of the five string literals shown.
-- symbolHints and fileHints may be empty arrays if nothing is mentioned.
-- affectsPublicApi is true when the change is likely to alter exported
-  function signatures, add/remove exported symbols, or change module shape.
-- summary must be a single sentence, no longer than 20 words.
-- Return nothing except the JSON object.
+// ---------------------------------------------------------------------------
+// Prompt builder
+// ---------------------------------------------------------------------------
 
-Developer prompt:
-`;
+/**
+ * Build the full LLM prompt from a developer prompt and optional repo context.
+ *
+ * When `repoContext` is provided the model is instructed to use only existing
+ * names; without it the model must guess (less accurate but still works).
+ */
+function buildPrompt(developerPrompt: string, repoContext: string | null): string {
+    const repoSection = repoContext
+        ? `\nCRITICAL CONSTRAINT: symbolHints MUST contain ONLY names that appear ` +
+          `verbatim in the "Indexed symbols" list below. fileHints MUST contain ONLY ` +
+          `paths from the "Source files" list. If the described change does not match ` +
+          `any real symbol or file in the list, return empty arrays [] — do NOT invent ` +
+          `names, do NOT use names from outside this codebase.\n\n` +
+          repoContext + '\n'
+        : '';
+
+    return (
+        `You are a code-change intent analyzer for a TypeScript codebase.\n` +
+        `\n` +
+        `Given a developer's description of a planned code change, extract structured\n` +
+        `information and return ONLY a valid JSON object — no markdown, no explanation,\n` +
+        `no code fences. The object must match this exact shape:\n` +
+        `\n` +
+        `{\n` +
+        `  "changeType": "add" | "modify" | "delete" | "refactor" | "unknown",\n` +
+        `  "symbolHints": ["exact symbol names from the Indexed symbols list"],\n` +
+        `  "fileHints": ["exact relative file paths from the Source files list"],\n` +
+        `  "affectsPublicApi": true | false,\n` +
+        `  "summary": "one sentence plain-English description of the change"\n` +
+        `}\n` +
+        `\n` +
+        `Rules:\n` +
+        `- changeType must be one of the five string literals shown.\n` +
+        `- symbolHints: ONLY use names that exist verbatim in the "Indexed symbols" list.\n` +
+        `  If no real symbol matches the intent, return [].\n` +
+        `  Include symbols whose implementation would need to change.\n` +
+        `- fileHints: ONLY use paths that exist verbatim in the "Source files" list.\n` +
+        `  If no file matches, return [].\n` +
+        `- affectsPublicApi is true when exported function signatures, parameter types,\n` +
+        `  return types, or exported symbol names would change.\n` +
+        `- summary must be a single sentence, no longer than 20 words.\n` +
+        `- Return ONLY the JSON object, nothing else.\n` +
+        repoSection +
+        `\nDeveloper prompt: ${developerPrompt}`
+    );
+}
 
 // ---------------------------------------------------------------------------
 // LLM model selector
@@ -132,28 +218,44 @@ function parseResponse(raw: string, prompt: string): IntentParseResult {
  * Parse a natural-language developer prompt into a structured
  * {@link IntentDescriptor} using the Copilot LLM via the VS Code LM API.
  *
- * @param prompt  The user's "What if I…" text.
- * @param token   Cancellation token — pass the one from the UI interaction.
+ * @param prompt               The user's "What if I…" text.
+ * @param token                Cancellation token — pass the one from the UI interaction.
+ * @param symbolIndex          Live symbol index from the workspace (used to ground the LLM
+ *                             in real symbol/file names).  Optional — if omitted the model
+ *                             still works but may invent names.
+ * @param workspaceRootFsPath  Absolute workspace path used to compute relative file paths
+ *                             inside the repo context.  Required when symbolIndex is given.
  *
  * @returns `{ ok: true, value }` on success, `{ ok: false, error }` if the
  *          LLM is unavailable or the response cannot be parsed.
- *
- * @example
- * ```ts
- * const result = await parseIntent('add auth middleware to all API routes', token);
- * if (result.ok) {
- *     console.log(result.value.symbolHints); // ['authenticate', 'AuthMiddleware', ...]
- * }
- * ```
  */
 export async function parseIntent(
     prompt: string,
     token: vscode.CancellationToken,
+    symbolIndex?: SymbolIndex,
+    workspaceRootFsPath?: string,
 ): Promise<IntentParseResult> {
     const trimmed = prompt.trim();
     if (!trimmed) {
         return { ok: false, error: { prompt, reason: 'Prompt is empty' } };
     }
+
+    // ── Build repo context ──────────────────────────────────────────────────
+    let repoContext: string | null = null;
+    if (symbolIndex && symbolIndex.size > 0 && workspaceRootFsPath) {
+        repoContext = buildRepoContext(symbolIndex, workspaceRootFsPath);
+        console.log(
+            `${LOG_PREFIX} Repo context built: ${symbolIndex.size} symbol(s), ` +
+            `context length ${repoContext.length} chars`,
+        );
+    } else {
+        console.warn(
+            `${LOG_PREFIX} No symbol index provided — LLM will guess symbol names. ` +
+            `Pass symbolIndex + workspaceRootFsPath for grounded hints.`,
+        );
+    }
+
+    const fullPrompt = buildPrompt(trimmed, repoContext);
 
     // ── Acquire model ───────────────────────────────────────────────────────
     let model: vscode.LanguageModelChat | undefined;
@@ -173,11 +275,11 @@ export async function parseIntent(
         };
     }
 
-    console.log(`${LOG_PREFIX} Sending prompt to model "${model.name}"…`);
+    console.log(`${LOG_PREFIX} Sending prompt to model "${model.name}" (total prompt: ${fullPrompt.length} chars)…`);
 
     // ── Send request ────────────────────────────────────────────────────────
     const messages = [
-        vscode.LanguageModelChatMessage.User(SYSTEM_INSTRUCTIONS + trimmed),
+        vscode.LanguageModelChatMessage.User(fullPrompt),
     ];
 
     let rawResponse = '';
