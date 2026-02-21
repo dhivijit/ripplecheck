@@ -58,7 +58,6 @@
   },
   "dependencies": {
     "cytoscape": "^3.33.1",
-    "graphlib": "^2.1.8",
     "simple-git": "^3.31.1",
     "ts-morph": "^27.0.2"
   }
