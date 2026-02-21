@@ -82,11 +82,14 @@ export async function ensureCacheDirectory(workspaceRoot: vscode.Uri): Promise<v
 
     if (!exists) {
         await vscode.workspace.fs.createDirectory(cacheUri);
-        await ensureGitignoreEntry(workspaceRoot);
         console.log(`[RippleCheck] Created cache directory: ${cacheUri.fsPath}`);
     } else {
         console.log(`[RippleCheck] Cache directory already exists: ${cacheUri.fsPath}`);
     }
+
+    // Always ensure .gitignore is up to date, regardless of whether the
+    // cache directory was just created or already existed.
+    await ensureGitignoreEntry(workspaceRoot);
 
     for (const [filename, initialContent] of Object.entries(INITIAL_FILES)) {
         const fileUri = vscode.Uri.joinPath(cacheUri, filename);

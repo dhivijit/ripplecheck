@@ -169,7 +169,7 @@ export async function activate(context: vscode.ExtensionContext) {
 			try {
 				const result     = await computeStagedBlastRadius(project, symbolIndex, graph, workspaceRootFsPath);
 				const stagedFiles = await getStagedFiles(workspaceRootFsPath);
-				provider?.postResult(result, stagedFiles, symbolIndex);
+				provider?.postResult(result, stagedFiles, symbolIndex, workspaceRootFsPath);
 
 				// Push fresh graph data (with blast-radius overlay) to the open panel.
 				const { nodes, edges } = buildGraphElements(symbolIndex, graph, result);
@@ -203,7 +203,7 @@ export async function activate(context: vscode.ExtensionContext) {
 					status: 'M',
 					absolutePath: filePath,
 				};
-				provider?.postResult(result, [fakeEntry], symbolIndex);
+				provider?.postResult(result, [fakeEntry], symbolIndex, workspaceRootFsPath);
 
 				const { nodes, edges } = buildGraphElements(symbolIndex, graph, result);
 				GraphPanel.postGraphData(nodes, edges);

@@ -62,15 +62,34 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
         result: BlastRadiusResult,
         stagedFiles: StagedFileEntry[],
         symbolIndex: SymbolIndex,
+        workspaceRootPath: string,
     ): void {
         if (!this._view) { return; }
+
+        // Normalise and ensure trailing slash so startsWith strips cleanly.
+        const normalRoot = workspaceRootPath.replace(/\\/g, '/').replace(/\/?$/, '/');
+
+        const toRelPath = (absPath: string): string => {
+            const p = absPath.replace(/\\/g, '/');
+            return p.startsWith(normalRoot) ? p.slice(normalRoot.length) : p;
+        };
+
+        // Parse a raw symbol ID (`absFilePath#symbolName`) into display parts.
+        const parseSymbolId = (id: string): { name: string; filePath: string } => {
+            const hash = id.indexOf('#');
+            if (hash === -1) { return { name: id, filePath: '' }; }
+            return { name: id.slice(hash + 1), filePath: toRelPath(id.slice(0, hash)) };
+        };
 
         // Serialise a symbol ID to a plain object the webview can render.
         const serialiseSymbol = (id: string) => {
             const e = symbolIndex.get(id);
-            return e
-                ? { id, name: e.name, filePath: e.filePath, kind: e.kind, startLine: e.startLine }
-                : { id, name: id, filePath: '', kind: 'unknown', startLine: 0 };
+            if (!e) {
+                // Ghost / deleted symbol — parse the raw ID for display
+                const { name, filePath } = parseSymbolId(id);
+                return { id, name, filePath, kind: 'unknown', startLine: 0 };
+            }
+            return { id, name: e.name, filePath: toRelPath(e.filePath), kind: e.kind, startLine: e.startLine };
         };
 
         // Build a flat name-lookup table for every symbol referenced in any path
@@ -620,9 +639,7 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
       listEl.innerHTML = symbols.map(function(sym) {
         var depth     = depthMap[sym.id] !== undefined ? depthMap[sym.id] : '?';
         var reason    = rootReasonMap[sym.id] || '';
-        var shortFile = sym.filePath
-          ? sym.filePath.replace(/^.*\\/([^\\/]+\\/[^\\/]+)$/, '$1').replace(/^.*\\/([^\\/]+)$/, '$1')
-          : '';
+        var shortFile = sym.filePath || '';
         var symPaths  = paths[sym.id] || [];
         var pathHtml  = '';
         if (symPaths.length > 0) {

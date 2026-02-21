@@ -53,7 +53,9 @@ export function buildGraphElements(
 
     const nodes = idList.map(id => {
         const sym   = symbolIndex.get(id);
-        const label = sym ? sym.name : id;
+        // For ghost/deleted symbols not in the index, parse the raw ID (`filePath#name`)
+        // and use only the symbol name portion as the label.
+        const label = sym ? sym.name : (id.includes('#') ? id.slice(id.indexOf('#') + 1) : id);
         return { data: { id: safeId.get(id)!, symbolId: id, label, role: role(id) } };
     });
 

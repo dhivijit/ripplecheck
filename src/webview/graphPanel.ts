@@ -303,20 +303,42 @@ export class GraphPanel {
   // No placeholder data — real elements arrive via the 'graphData' postMessage.
   const initialElements = [];
 
+  // ── Shared layout config (used in init, graphData, and toggle) ──────────
+  const layoutOpts = {
+    name:            'cose',
+    animate:         false,
+    padding:         40,
+    nodeRepulsion:   12000,
+    idealEdgeLength: 80,
+    nodeOverlap:     20,
+    gravity:         0.4,
+    edgeElasticity:  100,
+  };
+
   const cyStyle = [
     {
       selector: 'node',
       style: {
-        'background-color':  '#555',
-        'label':             'data(label)',
-        'font-size':         '10px',
-        'color':             '#bbb',
-        'text-valign':       'bottom',
-        'text-halign':       'center',
-        'text-margin-y':     '5px',
-        'width':             '26px',
-        'height':            '26px',
-        'border-width':      '0px',
+        'background-color':           '#555',
+        'label':                      'data(label)',
+        'font-size':                  '10px',
+        'color':                      '#ccc',
+        'text-valign':                'bottom',
+        'text-halign':                'center',
+        'text-margin-y':              6,
+        // Label readability — truncate long names and add contrast
+        'text-wrap':                  'ellipsis',
+        'text-max-width':             '90px',
+        'text-outline-width':         2,
+        'text-outline-color':         '#1e1e1e',
+        'text-background-color':      '#1e1e1e',
+        'text-background-opacity':    0.7,
+        'text-background-padding':    '2px',
+        'text-background-shape':      'roundrectangle',
+        // Scale node size by connectivity
+        'width':                      'mapData(degree, 0, 20, 24, 50)',
+        'height':                     'mapData(degree, 0, 20, 24, 50)',
+        'border-width':               '0px',
       },
     },
     { selector: 'node.root',     style: { 'background-color': '#e53935', 'border-width': '2px', 'border-color': '#ffcdd2' } },
@@ -326,17 +348,18 @@ export class GraphPanel {
     {
       selector: 'edge',
       style: {
-        'width':               1.5,
-        'line-color':          '#666',
-        'target-arrow-color':  '#666',
+        'width':               1.2,
+        'line-color':          '#555',
+        'target-arrow-color':  '#555',
         'target-arrow-shape':  'triangle',
         'curve-style':         'bezier',
         'arrow-scale':         0.8,
+        'opacity':             0.6,
       },
     },
     {
       selector: 'node:selected',
-      style: { 'border-width': '2px', 'border-color': 'var(--vscode-focusBorder, #007fd4)' },
+      style: { 'border-width': '3px', 'border-color': '#007fd4' },
     },
   ];
 
@@ -344,7 +367,7 @@ export class GraphPanel {
     container:          document.getElementById('cy'),
     elements:           initialElements,
     style:              cyStyle,
-    layout:             { name: 'cose', animate: false, padding: 30, nodeRepulsion: 5000 },
+    layout:             layoutOpts,
     zoomingEnabled:     true,
     userZoomingEnabled: true,
     panningEnabled:     true,
@@ -365,14 +388,16 @@ export class GraphPanel {
     if (isFull) {
       cy.nodes().show();
       cy.edges().show();
-      cy.fit();
+      cy.layout(layoutOpts).run();
     } else {
       cy.nodes('.other').hide();
       cy.edges()
         .filter(function(e) { return e.source().hidden() || e.target().hidden(); })
         .hide();
-      const visible = cy.nodes(':visible');
-      if (visible.length) { cy.fit(visible, 40); }
+      var visible = cy.elements(':visible');
+      if (visible.length) {
+        visible.layout(Object.assign({}, layoutOpts, { fit: true })).run();
+      }
     }
   }
 
@@ -409,7 +434,7 @@ export class GraphPanel {
           var r = node.data('role');
           if (r) { node.addClass(r); }
         });
-        cy.layout({ name: 'cose', animate: false, padding: 30, nodeRepulsion: 5000 }).run();
+        cy.layout(layoutOpts).run();
         document.getElementById('empty-state').style.display = 'none';
         console.log('[RippleCheck] Graph rendered — ' + cy.nodes().length + ' node(s) visible');
         break;
