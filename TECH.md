@@ -1,305 +1,278 @@
-Below is a **machine-consumable technical spec** you can hand to Copilot/agents.
-It intentionally avoids product language and focuses on *what to build and how it behaves*.
+Below is a clean **TECH.md** — not marketing, not architecture theory — just the concrete stack, libraries, and what each part is responsible for so an engineer immediately understands *what technologies exist in the repo and why*.
+
+You can drop this directly into the project root.
 
 ---
 
-# BlastRadius — Technical Specification
+# TECH.md
 
-## Goal
+## Runtime Environment
 
-Implement a local analysis system that determines the structural impact of staged git changes before a commit.
+**Primary Runtime:** Node.js (runs inside VSCode Extension Host)
 
-The system must:
-
-1. Read staged changes
-2. Map changes to code symbols
-3. Traverse dependency relationships
-4. Classify impact
-5. Produce structured output
-6. Allow commit or abort based on user decision
-
-The system analyzes static structure only.
-No runtime execution, no test execution, no behavioral prediction.
+Reason:
+The analyzer executes as part of a VSCode extension backend process.
+No external services, servers, or CLI binaries are required.
 
 ---
 
-## Target Environment
+## Language
 
-* Local developer machine
-* Git repository
-* TypeScript / Node.js codebases
-* Runs through git pre-commit hook
-* Communicates with VSCode extension UI
+**Implementation Language:** TypeScript
 
----
+Used for:
 
-## Technology Stack and Responsibilities
-
-### Runtime
-
-Node.js
-
-Purpose:
-
-* Execute analyzer CLI
-* Parse AST
-* Traverse graph
-* Produce report
+* extension backend
+* AST analysis engine
+* dependency graph
+* caching
+* IPC communication
+* UI messaging contracts
 
 ---
 
-### Git Integration
+## Core Technologies
 
-simple-git
+### VSCode Extension API
 
-Purpose:
-Extract staged changes:
+Purpose: Host and lifecycle control
+
+Responsibilities:
+
+* workspace activation
+* file system watching
+* SCM/git integration triggers
+* Webview UI communication
+* command registration
+* user decision handling
+
+The extension is the entrypoint of the entire system.
+
+---
+
+### ts-morph
+
+Purpose: Static code analysis
+
+Provides:
+
+* AST parsing
+* symbol resolution
+* type checker access
+* reference finding
+* import resolution
+
+Used to extract:
+
+* functions
+* classes
+* interfaces
+* exports
+* type relationships
+* call relationships
+
+All structural understanding originates from ts-morph.
+
+---
+
+### TypeScript Compiler API (via ts-morph)
+
+Purpose: True semantic relationships
+
+Used for:
+
+* resolving actual symbol references
+* detecting signature changes
+* identifying return type propagation
+* distinguishing type usage vs runtime usage
+
+No regex or text-based parsing is allowed.
+
+---
+
+### graphlib (or custom adjacency map)
+
+Purpose: Dependency graph storage and traversal
+
+Stores directed graph:
 
 ```
-git diff --cached
+dependent → dependency
+```
+
+Supports:
+
+* reverse traversal (blast radius)
+* depth calculation
+* path tracing
+
+Graph exists entirely in memory and is mirrored to disk cache.
+
+---
+
+### simple-git (or child_process git)
+
+Purpose: Read staged changes from repository
+
+Used commands:
+
+```
+git diff --cached --unified=0
 git diff --cached --name-only
 ```
 
-Output required:
+Provides:
 
 * changed files
 * changed line ranges
 
----
-
-### Code Understanding
-
-ts-morph
-
-Purpose:
-Convert source files into structured symbol graph.
-
-Required extraction:
-
-Symbols:
-
-* Function declarations
-* Methods
-* Classes
-* Interfaces
-* Exported members
-
-Relationships:
-
-* Function calls
-* Imports
-* Parameter types
-* Return types
-* Type references
-
-The parser must resolve references, not string match.
+Git is only a data source — not an execution environment.
 
 ---
 
-### Graph Representation
+### File System APIs (VSCode workspace.fs + Node fs)
 
-graphlib (or adjacency map)
+Purpose: Cache and workspace monitoring
 
-Purpose:
-Store dependency relationships and enable traversal.
+Used for:
 
-Graph characteristics:
-Directed graph
-
-Edge direction:
-Dependent → Dependency
-
-Example:
-controller → service → repository
-
-Required operations:
-
-* upstream traversal (who depends on changed node)
-* downstream traversal (what changed node depends on)
-* path tracing
+* storing graph cache
+* storing symbol index
+* detecting structural project changes
 
 ---
 
-### Cache
+## UI Layer
 
-Local JSON files
+### VSCode Webview
 
-Purpose:
-Avoid rebuilding graph on every commit.
+Purpose: Display analysis results
 
-Stored data:
+The UI never performs analysis.
 
-* symbol index
-* dependency graph
-* previous analysis timestamp
+Responsibilities:
 
-Graph rebuild occurs only when project files change structurally.
-
----
-
-### Impact Engine
-
-Custom logic
-
-Purpose:
-Given changed symbols, compute blast radius.
-
-Algorithm:
-
-1. Identify changed symbols
-2. Traverse reverse dependency edges
-3. Collect reachable nodes
-4. Categorize distance
-   depth = 1 → direct impact
-   depth > 1 → indirect impact
-
-Output:
-list of impacted symbols with path traces
+* render graph
+* display impacted symbols
+* display severity
+* return user decision
 
 ---
 
-### Risk Classifier
+### Cytoscape.js
 
-Rule-based engine
+Purpose: Graph visualization
 
-Purpose:
-Assign severity level.
+Used only in Webview.
 
-Rules:
+Displays:
 
-HIGH
+* nodes = symbols
+* edges = dependencies
+* colors = risk level
 
-* exported function modified
-* API route affected
-* return type changed
-* shared utility used by multiple modules
-
-MEDIUM
-
-* internal module dependency affected
-
-LOW
-
-* private function only
-
-NONE
-
-* test-only changes
+No analysis logic inside UI.
 
 ---
 
-### Output Format
+## Storage
 
-JSON (structured, deterministic)
+### Local Cache Directory
 
-Example:
-
-```json
-{
-  "change": {
-    "symbol": "getUser",
-    "type": "function",
-    "changeType": "signature"
-  },
-  "risk": "HIGH",
-  "directImpact": [
-    "userController"
-  ],
-  "indirectImpact": [
-    "authMiddleware",
-    "sessionService"
-  ],
-  "paths": [
-    ["userController", "getUser"],
-    ["authMiddleware", "userController", "getUser"]
-  ],
-  "reason": "Return type propagates into API response"
-}
+```
+.blastradius/
+    graph.json
+    symbols.json
+    metadata.json
 ```
 
-No natural language generation required in core analyzer.
+Contains:
+
+* dependency graph
+* symbol index
+* project hash
+
+Cache prevents full rebuild on every workspace open.
 
 ---
 
-### VSCode Communication
+## Event Sources
 
-IPC between analyzer and extension
+### Workspace Events
 
-Purpose:
+Triggered by VSCode:
 
-* Trigger analysis
-* Receive result
-* Show UI
-* Send user decision
+* workspace open
+* folder added
+* file edit
+* file delete
+* file create
 
-Analyzer must block until decision received.
-
-Return codes:
-
-0 → allow commit
-1 → abort commit
+Used to maintain incremental graph updates.
 
 ---
 
-### Visualization
+### Git Events
 
-Webview + Cytoscape.js
+Triggered by user actions:
 
-Purpose:
-Render graph using analysis output.
+* staging files
+* manual analysis command
 
-Nodes colored by risk level.
-
-No analysis logic in UI layer.
+Used to compute blast radius.
 
 ---
 
-## Execution Flow
+## Processing Pipeline
 
-1. Git pre-commit hook runs analyzer CLI
-2. CLI reads staged diff
-3. Changed lines mapped to symbols
-4. Graph loaded from cache or rebuilt
-5. Impact traversal performed
-6. Risk classification applied
-7. JSON report generated
-8. Sent to VSCode
-9. User decision returned
-10. Hook exits with status
-
----
-
-## Performance Constraints
-
-After initial graph build:
-
-analysis time < 1 second
-
-Requirements:
-
-* no full project reparse each commit
-* incremental symbol mapping
-* cached graph traversal only
+1. Workspace loads
+2. Project parsed with ts-morph
+3. Graph built and cached
+4. File changes update graph incrementally
+5. Git staged diff retrieved
+6. Changed lines mapped to symbols
+7. Graph traversed
+8. Impact classified
+9. Structured result sent to UI
+10. User decision returned
 
 ---
 
-## Non-Goals
+## Performance Strategy
 
-* No runtime simulation
-* No test execution
-* No AI-based dependency inference
-* No multi-language support
-* No repository-wide refactor suggestions
+Key requirement: avoid full reparse.
+
+Techniques used:
+
+* ts-morph project reuse
+* per-file reanalysis
+* adjacency graph updates
+* persistent cache
+* reverse dependency traversal only
 
 ---
 
-## Expected Behavior
+## Non-Used Technologies (Explicitly Out of Scope)
 
-Given a staged change, the system deterministically outputs:
+The system intentionally does NOT use:
 
-* impacted components
-* impact depth
-* risk severity
-* reasoning path
+* LLMs
+* runtime execution
+* test runners
+* language servers
+* AST string parsers
+* Babel / SWC / ESLint analyzers
+* external databases
+* remote services
 
-The output must be explainable by graph relationships only.
+All analysis is local and deterministic.
+
+---
+
+## Result
+
+The system forms a continuously maintained static dependency graph and performs deterministic structural impact analysis using only semantic TypeScript relationships.
+
+---
+
+If you want, next we should write **ARCHITECTURE.md** — that’s where we define modules and boundaries (AnalyzerEngine, GraphStore, SymbolIndex, ImpactService, etc.). That file is what makes contributors not destroy the design later 😄
