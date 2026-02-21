@@ -44,12 +44,42 @@ async function writeJsonFile(uri: vscode.Uri, content: unknown): Promise<void> {
     await vscode.workspace.fs.writeFile(uri, encoded);
 }
 
+async function ensureGitignoreEntry(workspaceRoot: vscode.Uri): Promise<void> {
+    const gitignoreUri = vscode.Uri.joinPath(workspaceRoot, '.gitignore');
+    const entry = CACHE_DIR;
+
+    let content = '';
+    const block = `# BlastRadius files\n${entry}\n`;
+    try {
+        const bytes = await vscode.workspace.fs.readFile(gitignoreUri);
+        content = new TextDecoder().decode(bytes);
+    } catch {
+        // if .gitignore doesn't exist yet, create it
+        await vscode.workspace.fs.writeFile(gitignoreUri, new TextEncoder().encode(block));
+        console.log(`[RippleCheck] Created .gitignore with entry: ${entry}`);
+        return;
+    }
+
+    const lines = content.split('\n').map(l => l.trim());
+    if (lines.includes(entry)) {
+        return;
+    }
+
+    const newContent = content.endsWith('\n') || content === ''
+        ? content + block
+        : content + '\n' + block;
+
+    await vscode.workspace.fs.writeFile(gitignoreUri, new TextEncoder().encode(newContent));
+    console.log(`[RippleCheck] Added ${entry} to .gitignore`);
+}
+
 export async function ensureCacheDirectory(workspaceRoot: vscode.Uri): Promise<void> {
     const cacheUri = getCacheUri(workspaceRoot);
     const exists = await directoryExists(cacheUri);
 
     if (!exists) {
         await vscode.workspace.fs.createDirectory(cacheUri);
+        await ensureGitignoreEntry(workspaceRoot);
         console.log(`[RippleCheck] Created cache directory: ${cacheUri.fsPath}`);
     } else {
         console.log(`[RippleCheck] Cache directory already exists: ${cacheUri.fsPath}`);
