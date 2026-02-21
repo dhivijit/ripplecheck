@@ -15,7 +15,20 @@ export async function buildSymbolIndex(
 
     console.log(`[RippleCheck] Building symbol index across ${sourceFiles.length} source file(s)...`);
 
+    const rootFsPath = workspaceRoot.fsPath;
     for (const sourceFile of sourceFiles) {
+        const fp = sourceFile.getFilePath();
+        // Skip node_modules, Next.js build output, and other generated dirs.
+        // ts-morph loads these for type resolution, but they are not workspace
+        // symbols — indexing them would pollute the lookup table and slow
+        // declarationToSymbolId resolution.
+        if (
+            !fp.startsWith(rootFsPath)     ||
+            fp.includes('/node_modules/') ||
+            fp.includes('/.next/')        ||
+            fp.includes('/dist/')         ||
+            fp.includes('/out/')
+        ) { continue; }
         const symbols = extractSymbols(sourceFile);
         for (const symbol of symbols) {
             index.set(symbol.id, symbol);

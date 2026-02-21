@@ -126,6 +126,9 @@ function isWorkspaceFile(filePath: string, workspaceRootFsPath: string): boolean
     return (
         filePath.startsWith(workspaceRootFsPath) &&
         !filePath.includes('/node_modules/') &&
+        !filePath.includes('/.next/')          &&  // Next.js build output
+        !filePath.includes('/dist/')           &&  // generic build output
+        !filePath.includes('/out/')            &&  // Next.js static export
         !/\/typescript\/lib\/lib\..+\.d\.ts$/.test(filePath)
     );
 }

@@ -9,16 +9,35 @@ const GRAPH_CACHE_PATH = '.blastradius/graph.json';
 
 export async function persistDependencyGraph(
     graph: DependencyGraph,
-    workspaceRoot: vscode.Uri
+    workspaceRoot: vscode.Uri,
+    section: 'present' | 'future' = 'present',
 ): Promise<void> {
-    const serializable = {
+    const graphUri = vscode.Uri.joinPath(workspaceRoot, GRAPH_CACHE_PATH);
+
+    // Read-modify-write: update only the requested section so the other
+    // section is not clobbered by an unrelated persist call.
+    let stored: Record<string, unknown> = {
+        present: { forward: {}, reverse: {} },
+        future:  { forward: {}, reverse: {} },
+    };
+    try {
+        const bytes  = await vscode.workspace.fs.readFile(graphUri);
+        const parsed = JSON.parse(new TextDecoder().decode(bytes));
+        if (parsed.present) {
+            stored = parsed;                    // new sectioned format
+        } else if (parsed.forward) {
+            stored.present = parsed;            // migrate old flat format
+        }
+    } catch { /* file does not exist yet — use defaults */ }
+
+    (stored as any)[section] = {
         forward: serializeMap(graph.forward),
         reverse: serializeMap(graph.reverse),
     };
-    const graphUri = vscode.Uri.joinPath(workspaceRoot, GRAPH_CACHE_PATH);
-    const encoded  = new TextEncoder().encode(JSON.stringify(serializable, null, 2));
+
+    const encoded = new TextEncoder().encode(JSON.stringify(stored, null, 2));
     await vscode.workspace.fs.writeFile(graphUri, encoded);
-    console.log(`[RippleCheck] Dependency graph persisted → ${graphUri.fsPath}`);
+    console.log(`[RippleCheck] Dependency graph[${section}] persisted → ${graphUri.fsPath}`);
 }
 
 function serializeMap(map: Map<string, Set<string>>): Record<string, string[]> {

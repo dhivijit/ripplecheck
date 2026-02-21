@@ -6,7 +6,10 @@ import { createHash } from 'crypto';
 const CACHE_DIR = '.blastradius';
 
 const INITIAL_FILES: Record<string, unknown> = {
-    'graph.json': {},
+    'graph.json': {
+        present: { forward: {}, reverse: {} },
+        future:  { forward: {}, reverse: {} },
+    },
     'symbols.json': {},
     'signatures.json': {},
     'fileHashes.json': {},

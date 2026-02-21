@@ -84,7 +84,16 @@ export interface BlastRadiusResult {
      * an arbitrarily-chosen single path.
      */
     paths: Map<string, string[][]>;
-}
+    /**
+     * The dependency graph as it will look after the staged changes are
+     * committed.  Only set by `computeStagedBlastRadius`; `traverseImpact`
+     * leaves this undefined.
+     *
+     * Pass to `persistDependencyGraph(stagedGraph, workspaceRoot, 'future')`
+     * to write the future section of graph.json so the webview can compare
+     * present vs. post-commit structure side-by-side.
+     */
+    stagedGraph?: DependencyGraph;}
 
 // ---------------------------------------------------------------------------
 // Shadow-copy helpers
@@ -266,7 +275,10 @@ export async function computeStagedBlastRadius(
     // ── Step 4 + 5: BFS on the LIVE graph ───────────────────────────────────
     // The staged snapshot tells us WHAT changed; the live graph tells us WHO
     // depends on it right now.  We never pass shadowGraph here.
-    return traverseImpact(roots, graph);
+    //
+    // shadowGraph is returned as stagedGraph so the caller can persist it
+    // as the 'future' section of graph.json via persistDependencyGraph.
+    return { ...traverseImpact(roots, graph), stagedGraph: shadowGraph };
 }
 
 // ---------------------------------------------------------------------------

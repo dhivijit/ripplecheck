@@ -1,6 +1,7 @@
 // The module 'vscode' contains the VS Code extensibility API
 // Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
+import { SourceFile } from 'ts-morph';
 import { ensureCacheDirectory, computeProjectHash, writeCacheMetadata } from './core/cache/cacheManager';
 import { loadCachedSymbolIndex, loadCachedDependencyGraph, loadCachedMetadata } from './core/cache/cacheLoader';
 import { computeFileHash, saveFileHashes, loadFileHashes } from './core/cache/fileHashStore';
@@ -59,6 +60,14 @@ export async function activate(context: vscode.ExtensionContext) {
 			const activeFilePaths = new Set<string>();
 			const newHashes       = new Map<string, string>();
 
+			// ── Pass 1: remove stale files and re-index their symbols ───────────
+			// All removals must complete BEFORE any re-walks.  If we interleaved
+			// (remove A → re-walk A → remove B → re-walk B), re-walking A would
+			// add edge A→B, then removing B would erase it.  B's later re-walk
+			// would never restore A→B because A is already processed.  Two
+			// passes guarantee every cross-file edge is re-established correctly.
+			const staleSourceFiles: SourceFile[] = [];
+
 			for (const sf of project.getSourceFiles()) {
 				const fp = sf.getFilePath();
 				activeFilePaths.add(fp);
@@ -72,8 +81,13 @@ export async function activate(context: vscode.ExtensionContext) {
 					try { sf.refreshFromFileSystemSync(); } catch { continue; }
 					const newSymbols = extractSymbols(sf);
 					for (const sym of newSymbols) { symbolIndex.set(sym.id, sym); }
-					walkSourceFile(sf, symbolIndex, workspaceRootFsPath, graph);
+					staleSourceFiles.push(sf); // only queued if refresh succeeded
 				}
+			}
+
+			// ── Pass 2: re-walk all stale files now that the full index is ready ─
+			for (const sf of staleSourceFiles) {
+				walkSourceFile(sf, symbolIndex, workspaceRootFsPath, graph);
 			}
 
 			// Remove symbols whose source files were deleted since the cache was written

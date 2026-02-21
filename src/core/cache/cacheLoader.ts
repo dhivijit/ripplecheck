@@ -28,14 +28,20 @@ export async function loadCachedSymbolIndex(workspaceRoot: vscode.Uri): Promise<
 }
 
 export async function loadCachedDependencyGraph(workspaceRoot: vscode.Uri): Promise<DependencyGraph | null> {
-    const raw = await readJson<{
-        forward: Record<string, string[]>;
-        reverse: Record<string, string[]>;
-    }>(workspaceRoot, '.blastradius/graph.json');
-    if (!raw || !raw.forward) { return null; }
+    const raw = await readJson<Record<string, unknown>>(workspaceRoot, '.blastradius/graph.json');
+    if (!raw) { return null; }
+
+    // Support the new sectioned format { present: { forward, reverse }, future: ... }
+    // and the legacy flat format { forward, reverse } transparently.
+    const graphData = (raw.present ?? raw) as {
+        forward?: Record<string, string[]>;
+        reverse?: Record<string, string[]>;
+    };
+    if (!graphData.forward) { return null; }
+
     return {
-        forward: new Map(Object.entries(raw.forward).map(([k, v]) => [k, new Set(v)])),
-        reverse: new Map(Object.entries(raw.reverse ?? {}).map(([k, v]) => [k, new Set(v)])),
+        forward: new Map(Object.entries(graphData.forward).map(([k, v]) => [k, new Set(v)])),
+        reverse: new Map(Object.entries(graphData.reverse ?? {}).map(([k, v]) => [k, new Set(v)])),
     };
 }
 
