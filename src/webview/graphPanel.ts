@@ -1,13 +1,32 @@
 import * as vscode from 'vscode';
 
+/** Async callback that loads the latest graph elements from .blastradius/ files. */
+type GraphLoader = () => Promise<{ nodes: object[]; edges: object[] }>;
+
 export class GraphPanel {
     public static readonly viewType = 'ripplecheck.graphView';
-    private static _instance: GraphPanel | undefined;
+    private static _instance:    GraphPanel | undefined;
+
+    // ── File-based data source ───────────────────────────────────────────────
+    // Registered once by extension.ts after the workspace is ready.
+    // Called every time the panel opens so it always reflects the latest
+    // graph.json + symbols.json from .blastradius/.
+    private static _graphLoader:  GraphLoader | undefined;
+    // Last blast-radius overlay — not persisted to a file, kept in memory.
+    private static _lastResult:   unknown | undefined;
 
     private readonly _panel: vscode.WebviewPanel;
     private readonly _extensionUri: vscode.Uri;
 
     // ── Public static API ────────────────────────────────────────────────────
+
+    /**
+     * Register the async function that reads graph.json + symbols.json and
+     * returns Cytoscape elements.  Must be called before any panel is opened.
+     */
+    public static setGraphLoader(loader: GraphLoader): void {
+        GraphPanel._graphLoader = loader;
+    }
 
     /** Open the graph panel beside the current editor, or reveal if already open. */
     public static createOrShow(extensionUri: vscode.Uri): void {
@@ -35,13 +54,17 @@ export class GraphPanel {
         GraphPanel._instance?._panel.webview.postMessage({ type: 'toggleMode', mode });
     }
 
-    /** Push serialised graph data (nodes + edges) to the panel. */
+    /**
+     * Push fresh graph data to an already-open panel (e.g. after analysis).
+     * Also updates the loader cache so the NEXT open gets the same data.
+     */
     public static postGraphData(nodes: unknown[], edges: unknown[]): void {
         GraphPanel._instance?._panel.webview.postMessage({ type: 'graphData', nodes, edges });
     }
 
-    /** Push a blast‑radius analysis result to the panel for node recolouring. */
+    /** Push a blast-radius analysis result to the panel for node recolouring. */
     public static postAnalysisResult(result: unknown): void {
+        GraphPanel._lastResult = result;
         GraphPanel._instance?._panel.webview.postMessage({ type: 'analysisResult', result });
     }
 
@@ -62,8 +85,29 @@ export class GraphPanel {
             GraphPanel._instance = undefined;
         });
 
-        this._panel.webview.onDidReceiveMessage(_message => {
-            // Reserved for future graph-panel-specific actions
+        this._panel.webview.onDidReceiveMessage(message => {
+            if (message.command === 'graphReady') {
+                console.log('[RippleCheck] Graph panel ready signal received');
+                if (!GraphPanel._graphLoader) {
+                    console.warn('[RippleCheck] graphReady received but no loader is registered — did setGraphLoader get called?');
+                    return;
+                }
+                // Load fresh from .blastradius/graph.json + symbols.json so the
+                // panel always reflects the persisted state, not a stale snapshot.
+                const panel = this._panel;
+                GraphPanel._graphLoader()
+                    .then(({ nodes, edges }) => {
+                        console.log(`[RippleCheck] Graph panel — posting ${nodes.length} node(s) + ${edges.length} edge(s) to webview`);
+                        panel.webview.postMessage({ type: 'graphData', nodes, edges });
+                        if (GraphPanel._lastResult !== undefined) {
+                            panel.webview.postMessage({
+                                type:   'analysisResult',
+                                result: GraphPanel._lastResult,
+                            });
+                        }
+                    })
+                    .catch(err => console.error('[RippleCheck] GraphPanel loader error:', err));
+            }
         });
     }
 
@@ -166,8 +210,11 @@ export class GraphPanel {
 
     /* ─── Canvas ─────────────────────────────────────────────── */
     #cy {
-      flex:       1;
-      width:      100%;
+      position:   absolute;
+      top:        0;
+      left:       0;
+      right:      0;
+      bottom:     0;
       background: var(--vscode-editor-background);
     }
 
@@ -251,6 +298,8 @@ export class GraphPanel {
 (function () {
   'use strict';
 
+  const vscode = acquireVsCodeApi();
+
   // No placeholder data — real elements arrive via the 'graphData' postMessage.
   const initialElements = [];
 
@@ -303,7 +352,9 @@ export class GraphPanel {
     maxZoom:            5,
   });
 
-  // Empty state is hidden once real graph data arrives (see 'graphData' handler below)
+  // Signal readiness — extension host will replay last analysis result if available.
+  console.log('[RippleCheck] Webview ready — sending graphReady signal');
+  vscode.postMessage({ command: 'graphReady' });
 
   // ── Toolbar: toggle ──────────────────────────────────────────────────────
   function setToggle(mode) {
@@ -348,26 +399,35 @@ export class GraphPanel {
         break;
 
       case 'graphData':
+        console.log('[RippleCheck] graphData received — nodes:', (msg.nodes || []).length, 'edges:', (msg.edges || []).length);
         // Replace all elements with real project graph
         cy.elements().remove();
         cy.add((msg.nodes || []).concat(msg.edges || []));
+        // Apply role classes immediately from node data so colours render
+        // even when no separate analysisResult message follows.
+        cy.nodes().forEach(function(node) {
+          var r = node.data('role');
+          if (r) { node.addClass(r); }
+        });
         cy.layout({ name: 'cose', animate: false, padding: 30, nodeRepulsion: 5000 }).run();
         document.getElementById('empty-state').style.display = 'none';
+        console.log('[RippleCheck] Graph rendered — ' + cy.nodes().length + ' node(s) visible');
         break;
 
       case 'analysisResult': {
-        // Recolour nodes based on blast radius classification
+        // Recolour nodes based on blast radius classification.
+        // Nodes use safe numeric IDs (n0, n1, …) so match on data('symbolId').
         var rootSet     = new Set((msg.result.roots    || []));
         var directSet   = new Set((msg.result.direct   || []));
         var indirectSet = new Set((msg.result.indirect || []));
 
         cy.nodes().forEach(function(node) {
           node.removeClass('root direct indirect other');
-          var id = node.id();
-          if      (rootSet.has(id))     { node.addClass('root'); }
-          else if (directSet.has(id))   { node.addClass('direct'); }
-          else if (indirectSet.has(id)) { node.addClass('indirect'); }
-          else                          { node.addClass('other'); }
+          var sid = node.data('symbolId') || node.id();
+          if      (rootSet.has(sid))     { node.addClass('root'); }
+          else if (directSet.has(sid))   { node.addClass('direct'); }
+          else if (indirectSet.has(sid)) { node.addClass('indirect'); }
+          else                           { node.addClass('other'); }
         });
         break;
       }

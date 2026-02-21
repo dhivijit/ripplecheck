@@ -12,6 +12,7 @@ import { GitVisualizerPanel } from './webview/panel';
 import { GraphPanel } from './webview/graphPanel';
 import { buildReferenceGraph, walkSourceFile } from './core/indexing/referenceWalker';
 import { persistDependencyGraph } from './core/graph/graphStore';
+import { buildGraphElements } from './core/graph/graphElements';
 import { removeFileFromGraph } from './core/watch/incrementalUpdater';
 import { registerFileWatcher } from './core/watch/fileWatcher';
 import { computeStagedBlastRadius, BlastRadiusResult } from './core/blast/blastRadiusEngine';
@@ -133,6 +134,34 @@ export async function activate(context: vscode.ExtensionContext) {
 			await saveFileHashes(hashes, workspaceRoot);
 		}
 
+		// ── Register the file-based graph loader for the panel ─────────────────
+		// Called every time the graph panel opens so it always reflects the
+		// latest graph.json + symbols.json written to .blastradius/.
+		GraphPanel.setGraphLoader(async () => {
+			console.log('[RippleCheck] Graph loader called — reading .blastradius/graph.json + symbols.json...');
+			const [idx, g] = await Promise.all([
+				loadCachedSymbolIndex(workspaceRoot),
+				loadCachedDependencyGraph(workspaceRoot),
+			]);
+			if (!idx) {
+				console.warn('[RippleCheck] Graph loader — symbols.json missing or empty, cannot build graph');
+				return { nodes: [], edges: [] };
+			}
+			if (!g) {
+				console.warn('[RippleCheck] Graph loader — graph.json missing or empty, cannot build graph');
+				return { nodes: [], edges: [] };
+			}
+			console.log(`[RippleCheck] Graph loader — index: ${idx.size} symbol(s), forward edges: ${g.forward.size} owner(s)`);
+			const empty: BlastRadiusResult = {
+				roots: [], directImpact: [], indirectImpact: [],
+				depthMap: new Map(), paths: new Map(),
+			};
+			const { nodes, edges } = buildGraphElements(idx, g, empty);
+			console.log(`[RippleCheck] Graph loader — built ${nodes.length} node(s), ${edges.length} edge(s) — posting to panel`);
+			return { nodes, edges };
+		});
+		console.log('[RippleCheck] Graph panel loader registered');
+
 		// ── Helper: run blast radius and push to all open panels ────────────────
 		const runAnalysis = async (): Promise<void> => {
 			provider?.postAnalysisStart();
@@ -141,7 +170,7 @@ export async function activate(context: vscode.ExtensionContext) {
 				const stagedFiles = await getStagedFiles(workspaceRootFsPath);
 				provider?.postResult(result, stagedFiles, symbolIndex);
 
-				// Push graph data to the Cytoscape panel (if open)
+				// Push fresh graph data (with blast-radius overlay) to the open panel.
 				const { nodes, edges } = buildGraphElements(symbolIndex, graph, result);
 				GraphPanel.postGraphData(nodes, edges);
 				GraphPanel.postAnalysisResult({
@@ -188,59 +217,3 @@ export async function activate(context: vscode.ExtensionContext) {
 // This method is called when your extension is deactivated
 export function deactivate() {}
 
-// ---------------------------------------------------------------------------
-// Graph element builder (Cytoscape-format, scoped to blast radius + 1-hop)
-// ---------------------------------------------------------------------------
-
-/**
- * Build Cytoscape node/edge objects for the impacted symbol set.
- *
- * To keep the graph manageable we include:
- *   - All roots, direct, and indirect impact symbols
- *   - Their forward/reverse neighbours in the live graph (1-hop context)
- *
- * Each node carries a `role` field: 'root' | 'direct' | 'indirect' | 'other'
- * which graphPanel.ts uses for colour coding.
- */
-function buildGraphElements(
-    symbolIndex: SymbolIndex,
-    graph: DependencyGraph,
-    result: BlastRadiusResult,
-): { nodes: object[]; edges: object[] } {
-    const rootIds     = new Set(result.roots.map(r => r.symbolId));
-    const directIds   = new Set(result.directImpact);
-    const indirectIds = new Set(result.indirectImpact);
-
-    // Start with the full impacted set
-    const allIds = new Set([...rootIds, ...directIds, ...indirectIds]);
-
-    // Add one hop of context around roots so edges have both endpoints
-    for (const rootId of rootIds) {
-        for (const nid of (graph.forward.get(rootId) ?? [])) { allIds.add(nid); }
-        for (const nid of (graph.reverse.get(rootId) ?? [])) { allIds.add(nid); }
-    }
-
-    const role = (id: string): string => {
-        if (rootIds.has(id))     { return 'root'; }
-        if (directIds.has(id))   { return 'direct'; }
-        if (indirectIds.has(id)) { return 'indirect'; }
-        return 'other';
-    };
-
-    const nodes = [...allIds].map(id => {
-        const sym   = symbolIndex.get(id);
-        const label = sym ? sym.name : id;
-        return { data: { id, label, role: role(id) } };
-    });
-
-    const edges: object[] = [];
-    for (const srcId of allIds) {
-        for (const tgtId of (graph.forward.get(srcId) ?? [])) {
-            if (allIds.has(tgtId)) {
-                edges.push({ data: { id: `${srcId}\u2192${tgtId}`, source: srcId, target: tgtId } });
-            }
-        }
-    }
-
-    return { nodes, edges };
-}
