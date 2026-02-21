@@ -1,7 +1,6 @@
 import { Project, Node } from 'ts-morph';
 import { SymbolIndex } from './symbolIndex';
-
-export type ReferenceGraph = Map<string, Set<string>>; // ownerSymbolId → Set<referencedSymbolId>
+import { DependencyGraph } from '../graph/types';
 
 // ---------------------------------------------------------------------------
 // Owner stack helpers
@@ -135,13 +134,23 @@ function isWorkspaceFile(filePath: string, workspaceRootFsPath: string): boolean
 // Recursive AST walk
 // ---------------------------------------------------------------------------
 
+function addEdge(graph: DependencyGraph, fromId: string, toId: string): void {
+    // Forward: fromId depends on toId
+    if (!graph.forward.has(fromId)) { graph.forward.set(fromId, new Set()); }
+    graph.forward.get(fromId)!.add(toId);
+
+    // Reverse: toId is depended on by fromId
+    if (!graph.reverse.has(toId)) { graph.reverse.set(toId, new Set()); }
+    graph.reverse.get(toId)!.add(fromId);
+}
+
 function walkNode(
     node: Node,
     ownerStack: string[],
     filePath: string,
     symbolIndex: SymbolIndex,
     workspaceRootFsPath: string,
-    graph: ReferenceGraph
+    graph: DependencyGraph
 ): void {
     // --- Step 3: maintain owner stack ---
     const isOwner = isOwnerNode(node);
@@ -180,10 +189,7 @@ function walkNode(
 
                         const referencedId = declarationToSymbolId(decl, declFilePath, symbolIndex);
                         if (referencedId && referencedId !== currentOwner) {
-                            if (!graph.has(currentOwner)) {
-                                graph.set(currentOwner, new Set());
-                            }
-                            graph.get(currentOwner)!.add(referencedId);
+                            addEdge(graph, currentOwner, referencedId);
                         }
                     }
                 }
@@ -212,8 +218,8 @@ export function buildReferenceGraph(
     project: Project,
     symbolIndex: SymbolIndex,
     workspaceRootFsPath: string
-): ReferenceGraph {
-    const graph: ReferenceGraph = new Map();
+): DependencyGraph {
+    const graph: DependencyGraph = { forward: new Map(), reverse: new Map() };
 
     for (const sourceFile of project.getSourceFiles()) {
         const filePath = sourceFile.getFilePath();
@@ -222,8 +228,12 @@ export function buildReferenceGraph(
     }
 
     let edgeCount = 0;
-    for (const edges of graph.values()) { edgeCount += edges.size; }
-    console.log(`[RippleCheck] Reference graph complete — ${graph.size} owner(s), ${edgeCount} edge(s)`);
+    for (const edges of graph.forward.values()) { edgeCount += edges.size; }
+    console.log(
+        `[RippleCheck] Reference graph complete — ` +
+        `${graph.forward.size} owner(s), ${edgeCount} forward edge(s), ` +
+        `${graph.reverse.size} reverse node(s)`
+    );
 
     return graph;
 }
