@@ -1,9 +1,12 @@
+import * as vscode from 'vscode';
 import { Project } from 'ts-morph';
 import { SymbolIndex } from '../indexing/symbolIndex';
 import { extractSymbols } from '../indexing/symbolExtractor';
 import { walkSourceFile } from '../indexing/referenceWalker';
 import { DependencyGraph } from '../graph/types';
 import { snapshotSignatures, detectSignatureChanges, SignatureChangeResult } from '../analysis/signatureAnalyzer';
+import { persistDependencyGraph } from '../graph/graphStore';
+import { computeFileHash, saveFileHashes } from '../cache/fileHashStore';
 
 // ---------------------------------------------------------------------------
 // Step A + B — remove a file's symbols and their edges from the graph
@@ -205,7 +208,8 @@ export async function rebuildInPlace(
     project: Project,
     symbolIndex: SymbolIndex,
     graph: DependencyGraph,
-    workspaceRootFsPath: string
+    workspaceRootFsPath: string,
+    workspaceRoot: vscode.Uri,
 ): Promise<void> {
     const t0 = Date.now();
 
@@ -236,6 +240,21 @@ export async function rebuildInPlace(
         walkSourceFile(sf, symbolIndex, workspaceRootFsPath, graph);
         if (++i % 20 === 0) { await yield_(); }
     }
+
+    // ── Persist rebuilt state ─────────────────────────────────────────────────────
+    // Without this the on-disk cache diverges from the in-memory state after
+    // every git checkout / merge / reset.  The next startup would re-patch all
+    // files even when switching back to a branch the cache already knows about.
+    const newHashes = new Map<string, string>();
+    for (const sf of project.getSourceFiles()) {
+        const fp   = sf.getFilePath();
+        const hash = computeFileHash(fp);
+        if (hash) { newHashes.set(fp, hash); }
+    }
+    await Promise.all([
+        persistDependencyGraph(graph, workspaceRoot),
+        saveFileHashes(newHashes, workspaceRoot),
+    ]);
 
     console.log(`[RippleCheck] Full rebuild complete — ${Date.now() - t0}ms`);
 }

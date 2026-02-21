@@ -3,3 +3,6 @@ dist
 node_modules
 .vscode-test/
 *.vsix
+# Compiled JS artefacts inside src/ (TypeScript output belongs in out/ only)
+src/**/*.js
+src/**/*.js.map

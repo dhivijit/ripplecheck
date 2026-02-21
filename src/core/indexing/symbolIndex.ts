@@ -42,7 +42,7 @@ export async function buildSymbolIndex(
     return index;
 }
 
-async function persistSymbolIndex(
+export async function persistSymbolIndex(
     index: SymbolIndex,
     workspaceRoot: vscode.Uri
 ): Promise<void> {

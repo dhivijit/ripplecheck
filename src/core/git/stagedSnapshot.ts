@@ -1,9 +1,5 @@
-import { execFile } from 'child_process';
 import * as path from 'path';
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+import { execGit } from './gitUtils';
 
 export type StagedStatus = 'A' | 'M' | 'D' | 'R' | 'C' | 'T';
 
@@ -17,27 +13,11 @@ export interface StagedFileEntry {
 }
 
 // ---------------------------------------------------------------------------
-// Internal git helper
-// ---------------------------------------------------------------------------
-
-/**
- * Run a git command and return its stdout as a UTF-8 string.
- * Rejects if git exits non-zero.
- */
-function execGit(args: string[], cwd: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-        execFile(
-            'git', args,
-            { cwd, encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 },
-            (err, stdout) => {
-                if (err) { reject(err); } else { resolve(stdout as string); }
-            }
-        );
-    });
-}
-
-// ---------------------------------------------------------------------------
 // Staged file list
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Types
 // ---------------------------------------------------------------------------
 
 /**

@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { DependencyGraph, BlastRadiusEntry } from './types';
+import { DependencyGraph } from './types';
 
 const GRAPH_CACHE_PATH = '.blastradius/graph.json';
 
@@ -69,53 +69,3 @@ export function getDependencies(graph: DependencyGraph, symbolId: string): strin
     return Array.from(graph.forward.get(symbolId) ?? []);
 }
 
-// ---------------------------------------------------------------------------
-// Blast radius — BFS on reverse graph
-// ---------------------------------------------------------------------------
-
-/**
- * Compute all symbols impacted by a change to `startId`.
- *
- * Traversal follows reverse edges: from changed symbol upward through every
- * dependent, then dependents of dependents, tracking depth at each level.
- *
- * Returns a Map<symbolId, depth> where depth 1 = direct dependent.
- * The starting symbol itself is not included in the result.
- *
- * Time complexity: O(affected nodes + affected edges)
- */
-export function computeBlastRadius(
-    graph: DependencyGraph,
-    startId: string
-): Map<string, number> {
-    const visited = new Map<string, number>(); // symbolId → depth
-    const queue: Array<{ id: string; depth: number }> = [{ id: startId, depth: 0 }];
-
-    while (queue.length > 0) {
-        const { id, depth } = queue.shift()!;
-        if (visited.has(id)) { continue; }
-        visited.set(id, depth);
-
-        const dependents = graph.reverse.get(id);
-        if (dependents) {
-            for (const depId of dependents) {
-                if (!visited.has(depId)) {
-                    queue.push({ id: depId, depth: depth + 1 });
-                }
-            }
-        }
-    }
-
-    // Remove the starting symbol — it didn't change, it is the change origin
-    visited.delete(startId);
-    return visited;
-}
-
-/**
- * Convert a blast-radius map into a sorted list (nearest impact first).
- */
-export function blastRadiusToList(result: Map<string, number>): BlastRadiusEntry[] {
-    return Array.from(result.entries())
-        .map(([symbolId, depth]) => ({ symbolId, depth }))
-        .sort((a, b) => a.depth - b.depth);
-}

@@ -6,7 +6,7 @@ import { ensureCacheDirectory, computeProjectHash, writeCacheMetadata } from './
 import { loadCachedSymbolIndex, loadCachedDependencyGraph, loadCachedMetadata } from './core/cache/cacheLoader';
 import { computeFileHash, saveFileHashes, loadFileHashes } from './core/cache/fileHashStore';
 import { loadProject } from './core/indexing/projectLoader';
-import { buildSymbolIndex } from './core/indexing/symbolIndex';
+import { buildSymbolIndex, persistSymbolIndex } from './core/indexing/symbolIndex';
 import { extractSymbols } from './core/indexing/symbolExtractor';
 import { GitVisualizerPanel } from './webview/panel';
 import { buildReferenceGraph, walkSourceFile } from './core/indexing/referenceWalker';
@@ -66,7 +66,9 @@ export async function activate(context: vscode.ExtensionContext) {
 			// add edge A→B, then removing B would erase it.  B's later re-walk
 			// would never restore A→B because A is already processed.  Two
 			// passes guarantee every cross-file edge is re-established correctly.
+			const yield_ = () => new Promise<void>(r => setImmediate(r));
 			const staleSourceFiles: SourceFile[] = [];
+			let staleI = 0;
 
 			for (const sf of project.getSourceFiles()) {
 				const fp = sf.getFilePath();
@@ -83,11 +85,14 @@ export async function activate(context: vscode.ExtensionContext) {
 					for (const sym of newSymbols) { symbolIndex.set(sym.id, sym); }
 					staleSourceFiles.push(sf); // only queued if refresh succeeded
 				}
+				if (++staleI % 20 === 0) { await yield_(); }
 			}
 
 			// ── Pass 2: re-walk all stale files now that the full index is ready ─
+			staleI = 0;
 			for (const sf of staleSourceFiles) {
 				walkSourceFile(sf, symbolIndex, workspaceRootFsPath, graph);
+				if (++staleI % 20 === 0) { await yield_(); }
 			}
 
 			// Remove symbols whose source files were deleted since the cache was written
@@ -97,8 +102,13 @@ export async function activate(context: vscode.ExtensionContext) {
 			}
 			for (const fp of deletedPaths) { removeFileFromGraph(fp, symbolIndex, graph); }
 
-			// Persist updated hashes so the next startup is accurate
-			await saveFileHashes(newHashes, workspaceRoot);
+			// Persist updated hashes, symbol index (with fresh signatureHashes),
+			// and graph so the next startup has accurate baselines for all three.
+			await Promise.all([
+				saveFileHashes(newHashes, workspaceRoot),
+				persistSymbolIndex(symbolIndex, workspaceRoot),
+				persistDependencyGraph(graph, workspaceRoot),
+			]);
 
 			console.log(`[RippleCheck] Cache restored — ${deletedPaths.size} deleted, stale files patched`);
 
@@ -119,7 +129,15 @@ export async function activate(context: vscode.ExtensionContext) {
 		}
 
 		// Step 6 — watch for file changes and keep graph in sync incrementally
-		registerFileWatcher(project, symbolIndex, graph, workspaceRoot, context);
+		registerFileWatcher(project, symbolIndex, graph, workspaceRoot, context, {
+			onRipple(rippleIds, filePath) {
+				console.log(
+					`[RippleCheck] ${rippleIds.length} signature ripple(s) in ` +
+					`${filePath.split('/').pop()} — blast radius pending webview integration`
+				);
+				// TODO: call computeStagedBlastRadius and push result to webview panel
+			},
+		});
 	}
 
 	const provider = new GitVisualizerPanel(context.extensionUri);

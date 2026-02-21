@@ -2,12 +2,29 @@ import * as vscode from 'vscode';
 import { Project } from 'ts-morph';
 import { SymbolIndex } from '../indexing/symbolIndex';
 import { DependencyGraph } from '../graph/types';
+import { SignatureChangeResult } from '../analysis/signatureAnalyzer';
 import {
     handleFileChanged,
     handleFileCreated,
     handleFileDeleted,
     rebuildInPlace,
 } from './incrementalUpdater';
+
+// ---------------------------------------------------------------------------
+// Options
+// ---------------------------------------------------------------------------
+
+export interface FileWatcherOptions {
+    /**
+     * Called after every debounced in-editor file change that produces at
+     * least one signature ripple (public API altered).  The ripple symbol IDs
+     * and the originating file path are provided so the caller can trigger a
+     * blast-radius computation or update the UI.
+     *
+     * Not called for safe (body-only) edits or when ripple.length === 0.
+     */
+    onRipple?: (rippleIds: string[], filePath: string) => void;
+}
 
 // ---------------------------------------------------------------------------
 // Debounce helper
@@ -42,11 +59,11 @@ function triggerRebuild(
     project: Project,
     symbolIndex: SymbolIndex,
     graph: DependencyGraph,
-    rootFsPath: string,
+    workspaceRoot: vscode.Uri,
     reason: string
 ): void {
     console.log(`[RippleCheck] ${reason} — starting background rebuild...`);
-    const promise = rebuildInPlace(project, symbolIndex, graph, rootFsPath)
+    const promise = rebuildInPlace(project, symbolIndex, graph, workspaceRoot.fsPath, workspaceRoot)
         .then(() => vscode.window.setStatusBarMessage('$(check) RippleCheck: ready', 3000))
         .catch(e => {
             console.error('[RippleCheck] Rebuild failed:', e);
@@ -64,7 +81,8 @@ export function registerFileWatcher(
     symbolIndex: SymbolIndex,
     graph: DependencyGraph,
     workspaceRoot: vscode.Uri,
-    context: vscode.ExtensionContext
+    context: vscode.ExtensionContext,
+    options?: FileWatcherOptions,
 ): void {
     const rootFsPath = workspaceRoot.fsPath;
 
@@ -91,7 +109,10 @@ export function registerFileWatcher(
     const onEdit = debounce((document: vscode.TextDocument) => {
         const fsPath = document.uri.fsPath;
         if (!isWatchedFile(fsPath, rootFsPath)) { return; }
-        handleFileChanged(fsPath, document.getText(), project, symbolIndex, graph, rootFsPath);
+        const result = handleFileChanged(fsPath, document.getText(), project, symbolIndex, graph, rootFsPath);
+        if (options?.onRipple && result.ripple.length > 0) {
+            options.onRipple(result.ripple, fsPath);
+        }
     }, 300);
 
     context.subscriptions.push(
@@ -166,7 +187,7 @@ export function registerFileWatcher(
     ];
 
     const onGitRefChange = debounce(() => {
-        triggerRebuild(project, symbolIndex, graph, rootFsPath, 'Git ref change');
+        triggerRebuild(project, symbolIndex, graph, workspaceRoot, 'Git ref change');
     }, 600);
 
     for (const pattern of gitPatterns) {
@@ -177,6 +198,17 @@ export function registerFileWatcher(
         w.onDidChange(onGitRefChange);
         w.onDidCreate(onGitRefChange);
     }
+
+    // .git/refs/heads/** — a plain `git commit` on a non-detached HEAD writes a
+    // new SHA into refs/heads/<branch> but does NOT touch .git/HEAD (which only
+    // changes on checkout/switch).  Without this watcher a regular commit never
+    // triggers a rebuild and the graph drifts out of sync with the working tree.
+    const refsHeadsWatcher = vscode.workspace.createFileSystemWatcher(
+        new vscode.RelativePattern(workspaceRoot, '.git/refs/heads/**')
+    );
+    context.subscriptions.push(refsHeadsWatcher);
+    refsHeadsWatcher.onDidChange(onGitRefChange);
+    refsHeadsWatcher.onDidCreate(onGitRefChange);
 
     console.log('[RippleCheck] File watcher registered');
 }

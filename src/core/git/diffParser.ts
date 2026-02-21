@@ -1,9 +1,5 @@
-import { execFile } from 'child_process';
 import * as path from 'path';
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+import { execGit } from './gitUtils';
 
 export interface DiffHunk {
     /** Absolute path of the file in its staged (new) form. */
@@ -22,23 +18,11 @@ export interface DiffHunk {
 }
 
 // ---------------------------------------------------------------------------
-// Internal git helper (consistent with stagedSnapshot.ts)
-// ---------------------------------------------------------------------------
-
-function execGit(args: string[], cwd: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-        execFile(
-            'git', args,
-            { cwd, encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 },
-            (err, stdout) => {
-                if (err) { reject(err); } else { resolve(stdout as string); }
-            }
-        );
-    });
-}
-
-// ---------------------------------------------------------------------------
 // Hunk header parser
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Types
 // ---------------------------------------------------------------------------
 
 /**

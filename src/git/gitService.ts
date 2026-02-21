@@ -1,3 +1,13 @@
+/**
+ * LEGACY — webview commit-history display only.
+ *
+ * This module is the sole consumer of `simple-git` in the codebase.
+ * It exists exclusively to feed the sidebar panel's commit log and diff view.
+ *
+ * ALL analysis-path git operations (staged snapshot, diff hunks, blast radius)
+ * use `child_process.execFile` via `src/core/git/gitUtils.ts` — never this class.
+ * Do NOT add blast-radius or indexing logic here.
+ */
 import simpleGit, { SimpleGit } from 'simple-git';
 import * as vscode from 'vscode';
 

@@ -8,9 +8,3 @@ export interface DependencyGraph {
     forward: Map<string, Set<string>>;
     reverse: Map<string, Set<string>>;
 }
-
-export interface BlastRadiusEntry {
-    symbolId: string;
-    /** Distance from the changed symbol. 1 = direct dependent. */
-    depth: number;
-}
