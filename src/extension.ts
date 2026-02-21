@@ -5,7 +5,8 @@ import { ensureCacheDirectory, isCacheReady } from './core/cache/cacheManager';
 import { loadProject } from './core/indexing/projectLoader';
 import { buildSymbolIndex } from './core/indexing/symbolIndex';
 import { GitVisualizerPanel } from './webview/panel';
-
+import { buildReferenceGraph } from './core/indexing/referenceWalker';
+import { persistReferenceGraph } from './core/graph/graphStore';
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
@@ -29,7 +30,11 @@ export async function activate(context: vscode.ExtensionContext) {
 		const project = loadProject(workspaceRoot.fsPath);
 
 		// Step 3 — build the symbol index and persist it to cache
-		await buildSymbolIndex(project, workspaceRoot);
+		const symbolIndex = await buildSymbolIndex(project, workspaceRoot);
+
+		// Step 4 - detect symbol ownership + record references, persist graph
+		const graph = buildReferenceGraph(project, symbolIndex, workspaceRoot.fsPath);
+		await persistReferenceGraph(graph, workspaceRoot);
 	}
 
 	const provider = new GitVisualizerPanel(context.extensionUri);
