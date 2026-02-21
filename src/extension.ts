@@ -31,7 +31,7 @@ export async function activate(context: vscode.ExtensionContext) {
 	const workspaceFolders = vscode.workspace.workspaceFolders;
 	if (workspaceFolders && workspaceFolders.length > 0) {
 		const workspaceRoot = workspaceFolders[0].uri;
-		const workspaceRootFsPath = workspaceRoot.fsPath;
+		const workspaceRootFsPath = workspaceRoot.fsPath.replace(/\\/g, '/');
 
 		// Step 1 — ensure .blastradius/ and its files exist
 		await ensureCacheDirectory(workspaceRoot);

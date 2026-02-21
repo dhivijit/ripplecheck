@@ -123,8 +123,9 @@ function declarationToSymbolId(decl: Node, declFilePath: string, symbolIndex: Sy
 // ---------------------------------------------------------------------------
 
 function isWorkspaceFile(filePath: string, workspaceRootFsPath: string): boolean {
+    const normalizedRoot = workspaceRootFsPath.replace(/\\/g, '/');
     return (
-        filePath.startsWith(workspaceRootFsPath) &&
+        filePath.startsWith(normalizedRoot) &&
         !filePath.includes('/node_modules/') &&
         !filePath.includes('/.next/')          &&  // Next.js build output
         !filePath.includes('/dist/')           &&  // generic build output

@@ -8,7 +8,7 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
     public static readonly viewType = 'ripplecheck.gitVisualizer';
     private _view?: vscode.WebviewView;
 
-    constructor(private readonly extensionUri: vscode.Uri) {}
+    constructor(private readonly extensionUri: vscode.Uri) { }
 
     public resolveWebviewView(
         webviewView: vscode.WebviewView,
@@ -88,12 +88,12 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
         }
 
         this._view.webview.postMessage({
-            type:           'analysisResult',
-            roots:          result.roots,
-            directImpact:   result.directImpact.map(serialiseSymbol),
+            type: 'analysisResult',
+            roots: result.roots,
+            directImpact: result.directImpact.map(serialiseSymbol),
             indirectImpact: result.indirectImpact.map(serialiseSymbol),
-            depthMap:       Object.fromEntries(result.depthMap),
-            paths:          Object.fromEntries(result.paths),
+            depthMap: Object.fromEntries(result.depthMap),
+            paths: Object.fromEntries(result.paths),
             symbolNameMap,
             stagedFiles,
         });
@@ -123,7 +123,13 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    html, body {
+      height: 100%;
+    }
+
     body {
+        display:     flex;
+        flex-direction: column;
       font-family: var(--vscode-font-family);
       font-size:   var(--vscode-font-size);
       color:       var(--vscode-foreground);
@@ -368,6 +374,17 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
     }
     .impact-row.expanded .path-trace { display: block; }
 
+    /* ─── Blast radius fills space when open; graph stays at bottom ── */
+    #blast-radius-section[open] {
+      flex:       1;
+      min-height: 0;
+      overflow-y: auto;
+    }
+
+    #graph-section {
+      margin-top: auto;
+    }
+
     /* ─── Graph open section ──────────────────────────── */
     .graph-open-area {
       display:        flex;
@@ -404,12 +421,15 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
   </div>
 
   <!-- ══ LLM SUMMARY ═══════════════════════════════════ -->
-  <div id="summary-card" class="rc-section">
-    <div class="skel w-full"></div>
-    <div class="skel w-3q"></div>
-    <div class="skel w-half"></div>
-    <div id="summary-text"></div>
-  </div>
+  <details class="rc-coll rc-section" id="summary-section" open>
+    <summary>AI Summary</summary>
+    <div id="summary-card">
+      <div class="skel w-full"></div>
+      <div class="skel w-3q"></div>
+      <div class="skel w-half"></div>
+      <div id="summary-text"></div>
+    </div>
+  </details>
 
   <!-- ══ CHANGED FILES ═════════════════════════════════ -->
   <details class="rc-coll rc-section" id="changed-files-section" open>
@@ -454,11 +474,6 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
   <div id="graph-section" class="rc-section">
     <div class="sec-inner graph-open-area">
       <button class="rc-btn wide-btn" id="open-graph-btn">&#9741; Open Graph View</button>
-      <div id="graph-toggle-row">
-        <span class="toggle-label">View:</span>
-        <button class="rc-btn-sm active" id="sidebar-btn-full">Full Graph</button>
-        <button class="rc-btn-sm"        id="sidebar-btn-session">Session</button>
-      </div>
     </div>
   </div>
 
@@ -476,19 +491,6 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
     // ── Open Graph button ────────────────────────────────────────────────
     document.getElementById('open-graph-btn').addEventListener('click', () => {
       vscode.postMessage({ command: 'openGraph' });
-    });
-
-    // ── Graph view toggle (relayed to GraphPanel if open) ─────────────────
-    document.getElementById('sidebar-btn-full').addEventListener('click', () => {
-      document.getElementById('sidebar-btn-full').classList.add('active');
-      document.getElementById('sidebar-btn-session').classList.remove('active');
-      vscode.postMessage({ command: 'graphToggle', mode: 'full' });
-    });
-
-    document.getElementById('sidebar-btn-session').addEventListener('click', () => {
-      document.getElementById('sidebar-btn-session').classList.add('active');
-      document.getElementById('sidebar-btn-full').classList.remove('active');
-      vscode.postMessage({ command: 'graphToggle', mode: 'session' });
     });
 
     // ── Incoming messages from extension host ────────────────────────────

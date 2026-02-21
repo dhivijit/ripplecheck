@@ -15,7 +15,7 @@ export async function buildSymbolIndex(
 
     console.log(`[RippleCheck] Building symbol index across ${sourceFiles.length} source file(s)...`);
 
-    const rootFsPath = workspaceRoot.fsPath;
+    const rootFsPath = workspaceRoot.fsPath.replace(/\\/g, '/');
     for (const sourceFile of sourceFiles) {
         const fp = sourceFile.getFilePath();
         // Skip node_modules, Next.js build output, and other generated dirs.

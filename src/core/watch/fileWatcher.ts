@@ -63,7 +63,7 @@ function triggerRebuild(
     reason: string
 ): void {
     console.log(`[RippleCheck] ${reason} — starting background rebuild...`);
-    const promise = rebuildInPlace(project, symbolIndex, graph, workspaceRoot.fsPath, workspaceRoot)
+    const promise = rebuildInPlace(project, symbolIndex, graph, workspaceRoot.fsPath.replace(/\\/g, '/'), workspaceRoot)
         .then(() => vscode.window.setStatusBarMessage('$(check) RippleCheck: ready', 3000))
         .catch(e => {
             console.error('[RippleCheck] Rebuild failed:', e);
@@ -84,7 +84,7 @@ export function registerFileWatcher(
     context: vscode.ExtensionContext,
     options?: FileWatcherOptions,
 ): void {
-    const rootFsPath = workspaceRoot.fsPath;
+    const rootFsPath = workspaceRoot.fsPath.replace(/\\/g, '/');
 
     // --- Track files recently touched by the editor so we can skip them in
     //     the external FS watcher (avoids double-processing editor saves). ---
@@ -102,12 +102,12 @@ export function registerFileWatcher(
     }
 
     context.subscriptions.push(
-        vscode.workspace.onDidSaveTextDocument(doc => markEditorSaved(doc.uri.fsPath))
+        vscode.workspace.onDidSaveTextDocument(doc => markEditorSaved(doc.uri.fsPath.replace(/\\/g, '/')))
     );
 
     // --- Document edits (in-memory, before save) — debounced ---
     const onEdit = debounce((document: vscode.TextDocument) => {
-        const fsPath = document.uri.fsPath;
+        const fsPath = document.uri.fsPath.replace(/\\/g, '/');
         if (!isWatchedFile(fsPath, rootFsPath)) { return; }
         const result = handleFileChanged(fsPath, document.getText(), project, symbolIndex, graph, rootFsPath);
         if (options?.onRipple && result.ripple.length > 0) {
@@ -123,8 +123,9 @@ export function registerFileWatcher(
     context.subscriptions.push(
         vscode.workspace.onDidCreateFiles(e => {
             for (const file of e.files) {
-                if (!isWatchedFile(file.fsPath, rootFsPath)) { continue; }
-                handleFileCreated(file.fsPath, project, symbolIndex, graph, rootFsPath);
+                const fp = file.fsPath.replace(/\\/g, '/');
+                if (!isWatchedFile(fp, rootFsPath)) { continue; }
+                handleFileCreated(fp, project, symbolIndex, graph, rootFsPath);
             }
         })
     );
@@ -133,8 +134,9 @@ export function registerFileWatcher(
     context.subscriptions.push(
         vscode.workspace.onDidDeleteFiles(e => {
             for (const file of e.files) {
-                if (!isWatchedFile(file.fsPath, rootFsPath)) { continue; }
-                handleFileDeleted(file.fsPath, project, symbolIndex, graph);
+                const fp = file.fsPath.replace(/\\/g, '/');
+                if (!isWatchedFile(fp, rootFsPath)) { continue; }
+                handleFileDeleted(fp, project, symbolIndex, graph);
             }
         })
     );
@@ -143,11 +145,13 @@ export function registerFileWatcher(
     context.subscriptions.push(
         vscode.workspace.onDidRenameFiles(e => {
             for (const { oldUri, newUri } of e.files) {
-                if (isWatchedFile(oldUri.fsPath, rootFsPath)) {
-                    handleFileDeleted(oldUri.fsPath, project, symbolIndex, graph);
+                const oldFsPath = oldUri.fsPath.replace(/\\/g, '/');
+                const newFsPath = newUri.fsPath.replace(/\\/g, '/');
+                if (isWatchedFile(oldFsPath, rootFsPath)) {
+                    handleFileDeleted(oldFsPath, project, symbolIndex, graph);
                 }
-                if (isWatchedFile(newUri.fsPath, rootFsPath)) {
-                    handleFileCreated(newUri.fsPath, project, symbolIndex, graph, rootFsPath);
+                if (isWatchedFile(newFsPath, rootFsPath)) {
+                    handleFileCreated(newFsPath, project, symbolIndex, graph, rootFsPath);
                 }
             }
         })
@@ -165,7 +169,7 @@ export function registerFileWatcher(
     context.subscriptions.push(externalFileWatcher);
 
     const onExternalChange = debounce((uri: vscode.Uri) => {
-        const fsPath = uri.fsPath;
+        const fsPath = uri.fsPath.replace(/\\/g, '/');
         if (!isWatchedFile(fsPath, rootFsPath)) { return; }
         if (wasEditorSaved(fsPath)) { return; } // editor already handled it
         // Read from disk — this is an external change (git, CLI, another editor)
