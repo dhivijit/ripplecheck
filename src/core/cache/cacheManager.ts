@@ -1,10 +1,15 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
+import * as fs from 'fs';
+import { createHash } from 'crypto';
 
 const CACHE_DIR = '.blastradius';
 
 const INITIAL_FILES: Record<string, unknown> = {
     'graph.json': {},
     'symbols.json': {},
+    'signatures.json': {},
+    'fileHashes.json': {},
     'metadata.json': {
         projectHash: '',
         createdAt: '',
@@ -76,4 +81,34 @@ export async function isCacheReady(workspaceRoot: vscode.Uri): Promise<boolean> 
     }
 
     return true;
+}
+
+/**
+ * Hash the content of tsconfig.json to detect project structure changes.
+ * If tsconfig changes, the cache must be invalidated and rebuilt.
+ */
+export function computeProjectHash(workspaceRootFsPath: string): string {
+    try {
+        const tsconfig = fs.readFileSync(path.join(workspaceRootFsPath, 'tsconfig.json'), 'utf8');
+        return createHash('sha256').update(tsconfig).digest('hex');
+    } catch {
+        return 'unknown';
+    }
+}
+
+/**
+ * Write metadata.json with the current project hash and timestamp.
+ * Called after every full rebuild so the next startup can use the cache.
+ */
+export async function writeCacheMetadata(
+    workspaceRoot: vscode.Uri,
+    projectHash: string
+): Promise<void> {
+    const metaUri = vscode.Uri.joinPath(workspaceRoot, '.blastradius/metadata.json');
+    await writeJsonFile(metaUri, {
+        projectHash,
+        createdAt: new Date().toISOString(),
+        version: '1.0.0',
+    });
+    console.log('[RippleCheck] Cache metadata written');
 }

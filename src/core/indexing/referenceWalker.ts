@@ -211,7 +211,7 @@ function walkNode(
 }
 
 // ---------------------------------------------------------------------------
-// Public entry point
+// Public entry point — full project
 // ---------------------------------------------------------------------------
 
 export function buildReferenceGraph(
@@ -236,4 +236,23 @@ export function buildReferenceGraph(
     );
 
     return graph;
+}
+
+// ---------------------------------------------------------------------------
+// Public entry point — single file (used by incremental updater)
+// ---------------------------------------------------------------------------
+
+/**
+ * Walk a single SourceFile and insert its edges into an existing graph.
+ * Called after step C of the incremental update so only one file is processed.
+ */
+export function walkSourceFile(
+    sourceFile: ReturnType<Project['getSourceFiles']>[number],
+    symbolIndex: SymbolIndex,
+    workspaceRootFsPath: string,
+    graph: DependencyGraph
+): void {
+    const filePath = sourceFile.getFilePath();
+    if (!isWorkspaceFile(filePath, workspaceRootFsPath)) { return; }
+    walkNode(sourceFile, [], filePath, symbolIndex, workspaceRootFsPath, graph);
 }

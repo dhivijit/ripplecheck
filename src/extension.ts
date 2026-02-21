@@ -1,46 +1,117 @@
 // The module 'vscode' contains the VS Code extensibility API
 // Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
-import { ensureCacheDirectory, isCacheReady } from './core/cache/cacheManager';
+import { ensureCacheDirectory, computeProjectHash, writeCacheMetadata } from './core/cache/cacheManager';
+import { loadCachedSymbolIndex, loadCachedDependencyGraph, loadCachedMetadata } from './core/cache/cacheLoader';
+import { computeFileHash, saveFileHashes, loadFileHashes } from './core/cache/fileHashStore';
 import { loadProject } from './core/indexing/projectLoader';
 import { buildSymbolIndex } from './core/indexing/symbolIndex';
+import { extractSymbols } from './core/indexing/symbolExtractor';
 import { GitVisualizerPanel } from './webview/panel';
-import { buildReferenceGraph } from './core/indexing/referenceWalker';
+import { buildReferenceGraph, walkSourceFile } from './core/indexing/referenceWalker';
 import { persistDependencyGraph } from './core/graph/graphStore';
+import { removeFileFromGraph } from './core/watch/incrementalUpdater';
+import { registerFileWatcher } from './core/watch/fileWatcher';
+import { DependencyGraph } from './core/graph/types';
+import { SymbolIndex } from './core/indexing/symbolIndex';
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
 export async function activate(context: vscode.ExtensionContext) {
 
-	// Use the console to output diagnostic information (console.log) and errors (console.error)
-	// This line of code will only be executed once when your extension is activated
-	console.log('Congratulations, your extension "ripplecheck" is now active!');
+	console.log('[RippleCheck] Activating...');
 
 	const workspaceFolders = vscode.workspace.workspaceFolders;
 	if (workspaceFolders && workspaceFolders.length > 0) {
 		const workspaceRoot = workspaceFolders[0].uri;
+		const workspaceRootFsPath = workspaceRoot.fsPath;
 
 		// Step 1 — ensure .blastradius/ and its files exist
-		const ready = await isCacheReady(workspaceRoot);
-		if (!ready) {
-			await ensureCacheDirectory(workspaceRoot);
+		await ensureCacheDirectory(workspaceRoot);
+
+		// Step 2 — load the ts-morph project (needed for both cache and full-rebuild paths)
+		const project = loadProject(workspaceRootFsPath);
+		const currentHash = computeProjectHash(workspaceRootFsPath);
+
+		// Step 3 — attempt to restore from cache (parallel reads)
+		const [cachedSymbols, cachedGraph, cachedMeta] = await Promise.all([
+			loadCachedSymbolIndex(workspaceRoot),
+			loadCachedDependencyGraph(workspaceRoot),
+			loadCachedMetadata(workspaceRoot),
+		]);
+
+		let symbolIndex: SymbolIndex;
+		let graph: DependencyGraph;
+
+		const cacheValid =
+			cachedSymbols !== null &&
+			cachedGraph  !== null &&
+			cachedMeta   !== null &&
+			cachedMeta.projectHash === currentHash &&
+			cachedSymbols.size > 0;
+
+		if (cacheValid) {
+			// Cache hit — restore live structures, patch only content-changed files
+			symbolIndex = cachedSymbols!;
+			graph       = cachedGraph!;
+
+			const cachedHashes   = await loadFileHashes(workspaceRoot);
+			const activeFilePaths = new Set<string>();
+			const newHashes       = new Map<string, string>();
+
+			for (const sf of project.getSourceFiles()) {
+				const fp = sf.getFilePath();
+				activeFilePaths.add(fp);
+
+				const currentHash = computeFileHash(fp);
+				newHashes.set(fp, currentHash);
+
+				const isStale = currentHash === '' || currentHash !== cachedHashes.get(fp);
+				if (isStale) {
+					removeFileFromGraph(fp, symbolIndex, graph);
+					try { sf.refreshFromFileSystemSync(); } catch { continue; }
+					const newSymbols = extractSymbols(sf);
+					for (const sym of newSymbols) { symbolIndex.set(sym.id, sym); }
+					walkSourceFile(sf, symbolIndex, workspaceRootFsPath, graph);
+				}
+			}
+
+			// Remove symbols whose source files were deleted since the cache was written
+			const deletedPaths = new Set<string>();
+			for (const entry of symbolIndex.values()) {
+				if (!activeFilePaths.has(entry.filePath)) { deletedPaths.add(entry.filePath); }
+			}
+			for (const fp of deletedPaths) { removeFileFromGraph(fp, symbolIndex, graph); }
+
+			// Persist updated hashes so the next startup is accurate
+			await saveFileHashes(newHashes, workspaceRoot);
+
+			console.log(`[RippleCheck] Cache restored — ${deletedPaths.size} deleted, stale files patched`);
+
+		} else {
+			// Cache miss or project structure changed — full rebuild
+			console.log('[RippleCheck] Cache miss — full rebuild...');
+			symbolIndex = await buildSymbolIndex(project, workspaceRoot);
+			graph       = buildReferenceGraph(project, symbolIndex, workspaceRootFsPath);
+			await persistDependencyGraph(graph, workspaceRoot);
+			await writeCacheMetadata(workspaceRoot, currentHash);
+
+			// Snapshot per-file content hashes so the next startup can diff precisely
+			const hashes = new Map<string, string>();
+			for (const sf of project.getSourceFiles()) {
+				hashes.set(sf.getFilePath(), computeFileHash(sf.getFilePath()));
+			}
+			await saveFileHashes(hashes, workspaceRoot);
 		}
 
-		// Step 2 — load all source files via ts-morph
-		const project = loadProject(workspaceRoot.fsPath);
-
-		// Step 3 — build the symbol index and persist it to cache
-		const symbolIndex = await buildSymbolIndex(project, workspaceRoot);
-
-		// Step 4 - detect symbol ownership + record references, persist graph
-		const graph = buildReferenceGraph(project, symbolIndex, workspaceRoot.fsPath);
-		await persistDependencyGraph(graph, workspaceRoot);
+		// Step 6 — watch for file changes and keep graph in sync incrementally
+		registerFileWatcher(project, symbolIndex, graph, workspaceRoot, context);
 	}
 
 	const provider = new GitVisualizerPanel(context.extensionUri);
-		context.subscriptions.push(
-			vscode.window.registerWebviewViewProvider(GitVisualizerPanel.viewType, provider)
-		);
+	context.subscriptions.push(
+		vscode.window.registerWebviewViewProvider(GitVisualizerPanel.viewType, provider)
+	);
 
 	// The command has been defined in the package.json file
 	// Now provide the implementation of the command with registerCommand
