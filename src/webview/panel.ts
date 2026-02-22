@@ -621,7 +621,7 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
     <summary>&#129300; What if?</summary>
     <div class="sec-inner">
       <textarea id="whatif-textarea"
-        placeholder="Describe a planned change\\u2026\\ne.g. &quot;add rate limiting to all API routes&quot;"
+        placeholder="Describe a planned change e.g. &quot;add rate limiting to all API routes&quot;"
       ></textarea>
       <button class="rc-btn" id="whatif-submit-btn">Predict Impact</button>
       <div class="status-bar" style="margin-top:6px">
