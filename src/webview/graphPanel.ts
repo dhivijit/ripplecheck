@@ -14,6 +14,9 @@ export class GraphPanel {
     private static _graphLoader:  GraphLoader | undefined;
     // Last blast-radius overlay — not persisted to a file, kept in memory.
     private static _lastResult:   unknown | undefined;
+    // Last graph data pushed via postGraphData — survives panel close/reopen.
+    private static _lastNodes:    unknown[] | undefined;
+    private static _lastEdges:    unknown[] | undefined;
 
     private readonly _panel: vscode.WebviewPanel;
     private readonly _extensionUri: vscode.Uri;
@@ -59,6 +62,8 @@ export class GraphPanel {
      * Also updates the loader cache so the NEXT open gets the same data.
      */
     public static postGraphData(nodes: unknown[], edges: unknown[]): void {
+        GraphPanel._lastNodes = nodes;
+        GraphPanel._lastEdges = edges;
         GraphPanel._instance?._panel.webview.postMessage({ type: 'graphData', nodes, edges });
     }
 
@@ -88,6 +93,21 @@ export class GraphPanel {
         this._panel.webview.onDidReceiveMessage(message => {
             if (message.command === 'graphReady') {
                 console.log('[RippleCheck] Graph panel ready signal received');
+
+                // Prefer the in-memory cache (includes blast-radius overlay)
+                // over the file-based loader (which is the raw graph without
+                // overlay data).  This ensures closing and re-opening the
+                // graph panel after analysis preserves the coloured state.
+                if (GraphPanel._lastNodes && GraphPanel._lastNodes.length > 0) {
+                    const panel = this._panel;
+                    console.log(`[RippleCheck] Graph panel — replaying ${GraphPanel._lastNodes.length} cached node(s) + ${(GraphPanel._lastEdges || []).length} edge(s)`);
+                    panel.webview.postMessage({ type: 'graphData', nodes: GraphPanel._lastNodes, edges: GraphPanel._lastEdges || [] });
+                    if (GraphPanel._lastResult !== undefined) {
+                        panel.webview.postMessage({ type: 'analysisResult', result: GraphPanel._lastResult });
+                    }
+                    return;
+                }
+
                 if (!GraphPanel._graphLoader) {
                     console.warn('[RippleCheck] graphReady received but no loader is registered — did setGraphLoader get called?');
                     return;

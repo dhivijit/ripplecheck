@@ -10,6 +10,16 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
     public static readonly viewType = 'ripplecheck.gitVisualizer';
     private _view?: vscode.WebviewView;
 
+    // ── State cache — survives webview dispose/re-resolve ─────────────────
+    // Sidebar webview views are destroyed when the user switches panels and
+    // re-created on return.  We cache every meaningful postMessage payload
+    // here and replay them on the `panelReady` signal so the UI is never blank.
+    private _lastAnalysisResult?: unknown;
+    private _lastPredictedResult?: unknown;
+    private _lastWhatIfIntent?: unknown;
+    private _lastLlmSummary?: string;
+    private _lastStatus?: string;
+
     /**
      * Called when the user submits a "What if?" prompt.
      * Extension.ts runs the full pipeline (parse → resolve → BFS) and posts
@@ -38,6 +48,9 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
 
         webviewView.webview.onDidReceiveMessage(message => {
             switch (message.command) {
+                case 'panelReady':
+                    this._replayState();
+                    break;
                 case 'analyze':
                     vscode.commands.executeCommand('ripplecheck.analyze');
                     break;
@@ -79,6 +92,7 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
 
     /** Called from extension.ts to signal that analysis is starting. */
     public postAnalysisStart(): void {
+        this._lastStatus = 'analyzing';
         this._view?.webview.postMessage({ type: 'analysisStart' });
     }
 
@@ -138,7 +152,7 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
             }
         }
 
-        this._view.webview.postMessage({
+        const msg = {
             type: 'analysisResult',
             roots: result.roots,
             directImpact: result.directImpact.map(serialiseSymbol),
@@ -147,17 +161,25 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
             paths: Object.fromEntries(result.paths),
             symbolNameMap,
             stagedFiles,
-        });
+        };
+
+        this._lastAnalysisResult = msg;
+        this._lastPredictedResult = undefined; // clear stale prediction
+        this._lastWhatIfIntent = undefined;
+        this._lastStatus = 'done';
+        this._view.webview.postMessage(msg);
     }
 
     /** Push the parsed intent descriptor immediately after LLM parsing completes. */
     public postWhatIfIntent(descriptor: IntentDescriptor): void {
-        this._view?.webview.postMessage({ type: 'whatIfIntent', descriptor });
+        const msg = { type: 'whatIfIntent', descriptor };
+        this._lastWhatIfIntent = msg;
+        this._view?.webview.postMessage(msg);
     }
 
     /** Push the full predicted blast radius (What If pipeline completion). */
     public postPredictedResult(result: PredictiveBlastRadiusResult): void {
-        this._view?.webview.postMessage({
+        const msg = {
             type:           'predictedResult',
             isRelevant:     result.isRelevant,
             changeType:     result.changeType,
@@ -175,12 +197,46 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
             paths:          Object.fromEntries(
                 Array.from(result.paths.entries()).map(([k, v]) => [k, v]),
             ),
-        });
+        };
+        this._lastPredictedResult = msg;
+        this._lastStatus = 'done';
+        this._view?.webview.postMessage(msg);
     }
 
     /** Compatibility shim — converts an IntentParseError to a postError call. */
     public postWhatIfError(error: IntentParseError): void {
         this.postError(error.reason, 'whatIf');
+    }
+
+    // ── State replay ─────────────────────────────────────────────────────────
+    // Called when the webview sends `panelReady` after being re-created.
+    private _replayState(): void {
+        if (!this._view) { return; }
+        console.log('[RippleCheck] Sidebar panel ready — replaying cached state');
+
+        // Replay analysis result (staged or in-editor)
+        if (this._lastAnalysisResult) {
+            this._view.webview.postMessage(this._lastAnalysisResult);
+        }
+
+        // Replay What-If intent + predicted result
+        if (this._lastWhatIfIntent) {
+            this._view.webview.postMessage(this._lastWhatIfIntent);
+        }
+        if (this._lastPredictedResult) {
+            this._view.webview.postMessage(this._lastPredictedResult);
+        }
+
+        // Replay LLM summary
+        if (this._lastLlmSummary) {
+            this._view.webview.postMessage({ type: 'llmChunk', text: this._lastLlmSummary });
+            this._view.webview.postMessage({ type: 'llmDone' });
+        }
+
+        // Restore status dot
+        if (this._lastStatus) {
+            this._view.webview.postMessage({ type: 'statusRestore', status: this._lastStatus });
+        }
     }
 
     private getNonce(): string {
@@ -646,6 +702,12 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
 
     var vscode = acquireVsCodeApi();
 
+    // Signal readiness — the extension host will replay any cached state.
+    vscode.postMessage({ command: 'panelReady' });
+
+    // Accumulate LLM summary text for replay awareness
+    var llmSummaryText = '';
+
     // ── Analyze button ───────────────────────────────────────────────────
     document.getElementById('analyze-btn').addEventListener('click', function() {
       vscode.postMessage({ command: 'analyze' });
@@ -769,6 +831,7 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
         case 'llmChunk': {
           var summaryEl = document.getElementById('summary-text');
           summaryEl.textContent += (msg.text || '');
+          llmSummaryText += (msg.text || '');
           summaryEl.style.display = 'block';
           document.querySelectorAll('.skel').forEach(function(el) { el.style.display = 'none'; });
           break;
@@ -777,6 +840,10 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
         case 'llmDone':
           document.querySelectorAll('.skel').forEach(function(el) { el.style.display = 'none'; });
           document.getElementById('summary-text').style.display = 'block';
+          break;
+
+        case 'statusRestore':
+          setStatus(msg.status);
           break;
 
         case 'error': {
