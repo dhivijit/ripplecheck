@@ -167,12 +167,22 @@ export async function activate(context: vscode.ExtensionContext) {
 		});
 		console.log('[RippleCheck] Graph panel loader registered');
 
+		// ── Analysis version — prevents stale async results from clobbering newer ones ──
+		// Both runAnalysis (async/staged) and runInEditorAnalysis (sync/live)
+		// increment this counter when they start.  Before posting results the
+		// handler checks that the version hasn't moved forward — if it has, a
+		// newer analysis has already started and this result is discarded.
+		let analysisVersion = 0;
+
 		// ── Helper: run blast radius and push to all open panels ────────────────
 		const runAnalysis = async (): Promise<void> => {
+			const myVersion = ++analysisVersion;
 			provider?.postAnalysisStart();
 			try {
 				const result     = await computeStagedBlastRadius(project!, symbolIndex!, graph!, workspaceRootFsPath);
+				if (myVersion !== analysisVersion) { return; } // stale — newer analysis started
 				const stagedFiles = await getStagedFiles(workspaceRootFsPath);
+				if (myVersion !== analysisVersion) { return; }
 				provider?.postResult(result, stagedFiles, symbolIndex!, workspaceRootFsPath);
 
 				// Push fresh graph data (with blast-radius overlay) to the open panel.
@@ -184,6 +194,7 @@ export async function activate(context: vscode.ExtensionContext) {
 					indirect: result.indirectImpact,
 				});
 			} catch (err) {
+				if (myVersion !== analysisVersion) { return; }
 				console.error('[RippleCheck] Blast radius error:', err);
 				provider?.postError(String(err));
 			}
@@ -193,6 +204,7 @@ export async function activate(context: vscode.ExtensionContext) {
 		// Called when the file watcher detects a signature change or symbol
 		// deletion in the editor buffer, before the user has run `git add`.
 		const runInEditorAnalysis = (changeResult: import('./core/analysis/signatureAnalyzer').SignatureChangeResult, filePath: string): void => {
+			const myVersion = ++analysisVersion;
 			provider?.postAnalysisStart();
 			try {
 				const result = computeInEditorBlastRadius(
@@ -201,6 +213,7 @@ export async function activate(context: vscode.ExtensionContext) {
 					changeResult.preRemovalDependents,
 					graph!,
 				);
+				if (myVersion !== analysisVersion) { return; }
 				// Show the changed file itself in the "Changed Files" list so the
 				// panel isn't completely empty on that section.
 				const fakeEntry: import('./core/git/stagedSnapshot').StagedFileEntry = {
@@ -223,6 +236,7 @@ export async function activate(context: vscode.ExtensionContext) {
 					`${result.indirectImpact.length} indirect`,
 				);
 			} catch (err) {
+				if (myVersion !== analysisVersion) { return; }
 				console.error('[RippleCheck] In-editor blast radius error:', err);
 				provider?.postError(String(err));
 			}

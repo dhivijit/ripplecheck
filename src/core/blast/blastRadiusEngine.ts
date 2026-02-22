@@ -422,13 +422,19 @@ export function traverseImpact(roots: ImpactRoot[], graph: DependencyGraph): Bla
     }
 
     // ── Classify ──────────────────────────────────────────────────────────────
-    // Presence in shallowParentMap is the authoritative signal for "direct":
-    // deep-reachable nodes are never in shallowParentMap (excluded by the guard).
+    // Classify by actual graph distance from any root, regardless of root type:
+    //   depth 1 → directImpact   (immediate callers)
+    //   depth ≥ 2 → indirectImpact (transitive callers)
+    //
+    // This matches user expectations: a depth-1 caller of an API-changed symbol
+    // is a "direct" dependent; only nodes further down the chain are "indirect".
+    // Shallow roots never populate depth ≥ 2 (BFS stops at 1 hop), so
+    // indirectImpact naturally remains empty for pure body-only changes.
     const directImpact: string[]   = [];
     const indirectImpact: string[] = [];
-    for (const id of depthMap.keys()) {
-        if (shallowParentMap.has(id)) { directImpact.push(id);   }
-        else                          { indirectImpact.push(id); }
+    for (const [id, depth] of depthMap) {
+        if (depth === 1) { directImpact.push(id);   }
+        else             { indirectImpact.push(id); }
     }
 
     // ── Reconstruct all explanation paths ─────────────────────────────────────
