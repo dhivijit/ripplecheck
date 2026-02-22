@@ -18,6 +18,7 @@ const INITIAL_FILES: Record<string, unknown> = {
         createdAt: '',
         version: '1.0.0',
     },
+    'impact.json': {},
 };
 
 function getCacheUri(workspaceRoot: vscode.Uri): vscode.Uri {

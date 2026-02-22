@@ -22,6 +22,7 @@ import { SymbolIndex } from './core/indexing/symbolIndex';
 import { parseIntent } from './core/intent/intentParser';
 import { resolveIntent } from './core/intent/intentResolver';
 import { computePredictiveBlastRadius } from './core/intent/predictiveEngine';
+import { buildImpactReport, persistImpactReport } from './core/impact/impactReport';
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
@@ -193,6 +194,10 @@ export async function activate(context: vscode.ExtensionContext) {
 					direct:   result.directImpact,
 					indirect: result.indirectImpact,
 				});
+
+				// Persist impact.json
+				const report = buildImpactReport(result, symbolIndex!, graph!, workspaceRootFsPath, 'staged');
+				void persistImpactReport(report, workspaceRoot);
 			} catch (err) {
 				if (myVersion !== analysisVersion) { return; }
 				console.error('[RippleCheck] Blast radius error:', err);
@@ -235,6 +240,10 @@ export async function activate(context: vscode.ExtensionContext) {
 					`${result.directImpact.length} direct, ` +
 					`${result.indirectImpact.length} indirect`,
 				);
+
+				// Persist impact.json
+				const report = buildImpactReport(result, symbolIndex!, graph!, workspaceRootFsPath, 'in-editor');
+				void persistImpactReport(report, workspaceRoot);
 			} catch (err) {
 				if (myVersion !== analysisVersion) { return; }
 				console.error('[RippleCheck] In-editor blast radius error:', err);
@@ -286,6 +295,12 @@ export async function activate(context: vscode.ExtensionContext) {
 		// Steps 3–5: virtual diff → BFS → confidence map
 		const predicted = computePredictiveBlastRadius(resolved, symbolIndex, graph);
 		provider!.postPredictedResult(predicted);
+
+		// Persist impact.json for the What-If prediction
+		if (workspaceFolders && workspaceFolders.length > 0) {
+			const report = buildImpactReport(predicted, symbolIndex, graph, workspaceRootFsPath, 'what-if', predicted.confidenceMap);
+			void persistImpactReport(report, workspaceFolders[0].uri);
+		}
 	};
 
 	console.log('[RippleCheck] Blast radius + What If? pipeline wired to panel');
