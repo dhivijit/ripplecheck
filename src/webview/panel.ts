@@ -577,17 +577,6 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
     <button class="rc-btn" id="analyze-btn">&#9654; Analyze</button>
   </div>
 
-  <!-- ══ LLM SUMMARY ═══════════════════════════════════ -->
-  <details class="rc-coll rc-section" id="summary-section" open>
-    <summary>AI Summary</summary>
-    <div id="summary-card">
-      <div class="skel w-full"></div>
-      <div class="skel w-3q"></div>
-      <div class="skel w-half"></div>
-      <div id="summary-text"></div>
-    </div>
-  </details>
-
   <!-- ══ CHANGED FILES ═════════════════════════════════ -->
   <details class="rc-coll rc-section" id="changed-files-section" open>
     <summary>
@@ -629,7 +618,7 @@ export class GitVisualizerPanel implements vscode.WebviewViewProvider {
 
   <!-- ══ WHAT IF? ══════════════════════════════════════ -->
   <details class="rc-coll rc-section" id="whatif-section" open>
-    <summary>&#129300; What if\\u2026?</summary>
+    <summary>&#129300; What if?</summary>
     <div class="sec-inner">
       <textarea id="whatif-textarea"
         placeholder="Describe a planned change\\u2026\\ne.g. &quot;add rate limiting to all API routes&quot;"
