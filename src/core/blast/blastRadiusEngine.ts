@@ -37,8 +37,11 @@ export type RootReason = 'body-change' | 'signature-ripple' | 'deleted' | 'renam
  * a hunk touched its signature), the highest-priority reason wins.
  *
  * deleted > signature-ripple > renamed > body-change
+ *
+ * Exported so `virtualDiff.ts` and `predictiveEngine.ts` can reuse the same
+ * deduplication logic without duplicating the priority table.
  */
-const REASON_PRIORITY: Record<RootReason, number> = {
+export const REASON_PRIORITY: Record<RootReason, number> = {
     'deleted':          3,
     'signature-ripple': 2,
     'renamed':          1,
@@ -361,8 +364,11 @@ export function computeInEditorBlastRadius(
  *
  * This guarantees that staging a shallow body-change alongside a deep API
  * change never reclassifies a transitively-impacted symbol as "direct".
+ *
+ * Exported so `predictiveEngine.ts` can feed a virtual diff into the same BFS
+ * without duplicating traversal logic.
  */
-function traverseImpact(roots: ImpactRoot[], graph: DependencyGraph): BlastRadiusResult {
+export function traverseImpact(roots: ImpactRoot[], graph: DependencyGraph): BlastRadiusResult {
     const rootSet      = new Set(roots.map(r => r.symbolId));
     const deepRoots    = roots.filter(r => r.propagationMode === 'deep');
     const shallowRoots = roots.filter(r => r.propagationMode === 'shallow');

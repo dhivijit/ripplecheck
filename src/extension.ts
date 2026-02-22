@@ -1,7 +1,7 @@
 // The module 'vscode' contains the VS Code extensibility API
 // Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
-import { SourceFile } from 'ts-morph';
+import { Project, SourceFile } from 'ts-morph';
 import { ensureCacheDirectory, computeProjectHash, writeCacheMetadata } from './core/cache/cacheManager';
 import { loadCachedSymbolIndex, loadCachedDependencyGraph, loadCachedMetadata } from './core/cache/cacheLoader';
 import { computeFileHash, saveFileHashes, loadFileHashes } from './core/cache/fileHashStore';
@@ -15,30 +15,37 @@ import { persistDependencyGraph } from './core/graph/graphStore';
 import { buildGraphElements } from './core/graph/graphElements';
 import { removeFileFromGraph } from './core/watch/incrementalUpdater';
 import { registerFileWatcher } from './core/watch/fileWatcher';
-import { computeStagedBlastRadius, BlastRadiusResult } from './core/blast/blastRadiusEngine';
-import { computeInEditorBlastRadius } from './core/blast/blastRadiusEngine';
+import { computeStagedBlastRadius, computeInEditorBlastRadius, BlastRadiusResult } from './core/blast/blastRadiusEngine';
 import { getStagedFiles } from './core/git/stagedSnapshot';
 import { DependencyGraph } from './core/graph/types';
 import { SymbolIndex } from './core/indexing/symbolIndex';
+import { parseIntent } from './core/intent/intentParser';
+import { resolveIntent } from './core/intent/intentResolver';
+import { computePredictiveBlastRadius } from './core/intent/predictiveEngine';
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
 export async function activate(context: vscode.ExtensionContext) {
 
 	console.log('[RippleCheck] Activating...');
-	// Declared here so the onRipple closure and ripplecheck.analyze command can
-	// both post messages to the sidebar without a separate ref-object indirection.
+
+	// Hoisted so closures in registerFileWatcher and provider callbacks capture live values.
+	let symbolIndex: SymbolIndex | undefined;
+	let project: Project | undefined;
+	let graph: DependencyGraph | undefined;
 	let provider: GitVisualizerPanel | undefined;
+	let workspaceRootFsPath = '';
+
 	const workspaceFolders = vscode.workspace.workspaceFolders;
 	if (workspaceFolders && workspaceFolders.length > 0) {
 		const workspaceRoot = workspaceFolders[0].uri;
-		const workspaceRootFsPath = workspaceRoot.fsPath.replace(/\\/g, '/');
+		workspaceRootFsPath = workspaceRoot.fsPath.replace(/\\/g, '/');
 
 		// Step 1 — ensure .blastradius/ and its files exist
 		await ensureCacheDirectory(workspaceRoot);
 
 		// Step 2 — load the ts-morph project (needed for both cache and full-rebuild paths)
-		const project = loadProject(workspaceRootFsPath);
+		project = loadProject(workspaceRootFsPath);
 		const currentHash = computeProjectHash(workspaceRootFsPath);
 
 		// Step 3 — attempt to restore from cache (parallel reads)
@@ -47,9 +54,6 @@ export async function activate(context: vscode.ExtensionContext) {
 			loadCachedDependencyGraph(workspaceRoot),
 			loadCachedMetadata(workspaceRoot),
 		]);
-
-		let symbolIndex: SymbolIndex;
-		let graph: DependencyGraph;
 
 		const cacheValid =
 			cachedSymbols !== null &&
@@ -167,12 +171,12 @@ export async function activate(context: vscode.ExtensionContext) {
 		const runAnalysis = async (): Promise<void> => {
 			provider?.postAnalysisStart();
 			try {
-				const result     = await computeStagedBlastRadius(project, symbolIndex, graph, workspaceRootFsPath);
+				const result     = await computeStagedBlastRadius(project!, symbolIndex!, graph!, workspaceRootFsPath);
 				const stagedFiles = await getStagedFiles(workspaceRootFsPath);
-				provider?.postResult(result, stagedFiles, symbolIndex, workspaceRootFsPath);
+				provider?.postResult(result, stagedFiles, symbolIndex!, workspaceRootFsPath);
 
 				// Push fresh graph data (with blast-radius overlay) to the open panel.
-				const { nodes, edges } = buildGraphElements(symbolIndex, graph, result);
+				const { nodes, edges } = buildGraphElements(symbolIndex!, graph!, result);
 				GraphPanel.postGraphData(nodes, edges);
 				GraphPanel.postAnalysisResult({
 					roots:    result.roots.map(r => r.symbolId),
@@ -195,7 +199,7 @@ export async function activate(context: vscode.ExtensionContext) {
 					changeResult.ripple,
 					changeResult.removed,
 					changeResult.preRemovalDependents,
-					graph,
+					graph!,
 				);
 				// Show the changed file itself in the "Changed Files" list so the
 				// panel isn't completely empty on that section.
@@ -203,9 +207,9 @@ export async function activate(context: vscode.ExtensionContext) {
 					status: 'M',
 					absolutePath: filePath,
 				};
-				provider?.postResult(result, [fakeEntry], symbolIndex, workspaceRootFsPath);
+				provider?.postResult(result, [fakeEntry], symbolIndex!, workspaceRootFsPath);
 
-				const { nodes, edges } = buildGraphElements(symbolIndex, graph, result);
+				const { nodes, edges } = buildGraphElements(symbolIndex!, graph!, result);
 				GraphPanel.postGraphData(nodes, edges);
 				GraphPanel.postAnalysisResult({
 					roots:    result.roots.map(r => r.symbolId),
@@ -225,7 +229,7 @@ export async function activate(context: vscode.ExtensionContext) {
 		};
 
 		// Step 6 — watch for file changes and keep graph in sync incrementally
-		registerFileWatcher(project, symbolIndex, graph, workspaceRoot, context, {
+		registerFileWatcher(project!, symbolIndex!, graph!, workspaceRoot, context, {
 			onRipple(changeResult, filePath) {
 				console.log(
 					`[RippleCheck] Signature/removal change in ` +
@@ -247,6 +251,30 @@ export async function activate(context: vscode.ExtensionContext) {
 	}
 
 	provider = new GitVisualizerPanel(context.extensionUri);
+
+	// Wire the full What If? pipeline: parse → resolve → virtual diff → BFS → confidence.
+	provider.onWhatIfRequest = async (prompt, token) => {
+		if (!symbolIndex || !graph) {
+			throw new Error('Workspace still loading — try again in a moment.');
+		}
+		console.log(`[RippleCheck] What-if: "${prompt}" | ${symbolIndex.size} symbols`);
+
+		// Step 1: parse intent via LLM
+		const parseResult = await parseIntent(prompt, token, symbolIndex, workspaceRootFsPath || undefined);
+		if (!parseResult.ok) { throw new Error(parseResult.error.reason); }
+
+		// Post intent immediately so the UI shows something before BFS finishes.
+		provider!.postWhatIfIntent(parseResult.value);
+
+		// Step 2: fuzzy-match hints → real symbol IDs
+		const resolved = resolveIntent(parseResult.value, symbolIndex, workspaceRootFsPath || '');
+
+		// Steps 3–5: virtual diff → BFS → confidence map
+		const predicted = computePredictiveBlastRadius(resolved, symbolIndex, graph);
+		provider!.postPredictedResult(predicted);
+	};
+
+	console.log('[RippleCheck] Blast radius + What If? pipeline wired to panel');
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider(GitVisualizerPanel.viewType, provider),
 	);
